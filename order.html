@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Order - ZEPPO</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: Arial, sans-serif; background-color: #f5f5f5; }
+        header { background-color: #ff6b00; color: white; text-align: center; padding: 20px 15px; }
+        header h1 { font-size: 28px; }
+        header p { font-size: 13px; margin-top: 5px; }
+        .restaurant-info { max-width: 700px; margin: 20px auto; padding: 0 15px; }
+        .restaurant-info h2 { font-size: 22px; color: #333; }
+        .restaurant-info p { font-size: 14px; color: #888; margin-top: 5px; }
+        .menu-section { max-width: 700px; margin: 0 auto; padding: 0 15px 20px 15px; }
+        .category-title { font-size: 18px; font-weight: bold; color: #ff6b00; margin: 20px 0 10px 0; border-bottom: 2px solid #ff6b00; padding-bottom: 5px; }
+        .menu-item { background: white; border-radius: 12px; padding: 15px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 2px 6px rgba(0,0,0,0.08); }
+        .item-info h3 { font-size: 15px; color: #333; }
+        .item-info p { font-size: 12px; color: #888; margin-top: 3px; }
+        .item-price { font-size: 15px; font-weight: bold; color: #ff6b00; }
+        .add-btn { background-color: #ff6b00; color: white; border: none; padding: 7px 15px; border-radius: 20px; cursor: pointer; font-size: 13px; margin-left: 10px; }
+        .cart { max-width: 700px; margin: 0 auto 40px auto; padding: 0 15px; }
+        .cart h2 { font-size: 18px; color: #333; margin-bottom: 12px; }
+        .cart-box { background: white; border-radius: 12px; padding: 20px; box-shadow: 0 2px 6px rgba(0,0,0,0.08); }
+        .cart-item { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #eee; font-size: 14px; }
+        .cart-total { display: flex; justify-content: space-between; padding: 15px 0 5px 0; font-weight: bold; font-size: 16px; color: #333; }
+        .empty-cart { text-align: center; color: #aaa; padding: 20px; font-size: 14px; }
+        .order-form { margin-top: 20px; border-top: 1px solid #eee; padding-top: 20px; }
+        .order-form h3 { font-size: 16px; color: #333; margin-bottom: 15px; }
+        .order-form input { width: 100%; padding: 10px 15px; border: 1px solid #ddd; border-radius: 8px; font-size: 14px; margin-bottom: 12px; outline: none; }
+        .order-form input:focus { border-color: #ff6b00; }
+        .order-btn { width: 100%; padding: 14px; background-color: #ff6b00; color: white; border: none; border-radius: 8px; font-size: 16px; cursor: pointer; margin-top: 5px; }
+        .success-box { display: none; text-align: center; padding: 30px 20px; }
+        .success-box h2 { color: #27ae60; font-size: 24px; margin-bottom: 10px; }
+        .success-box p { color: #555; font-size: 15px; margin-bottom: 5px; }
+        .back-link { text-align: center; margin-top: 15px; }
+        .back-link a { color: #ff6b00; text-decoration: none; font-size: 14px; }
+        .loading { text-align: center; color: #aaa; padding: 40px; }
+        .no-menu { text-align: center; color: #aaa; padding: 40px; background: white; border-radius: 12px; }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>⚡ ZEPPO</h1>
+        <p>ZEPPO — Ghar tak, jhatpat!</p>
+    </header>
+
+    <div class="restaurant-info">
+        <h2 id="restaurant-name">Loading...</h2>
+        <p id="restaurant-category"></p>
+    </div>
+
+    <div class="menu-section" id="menu-section">
+        <div class="loading">Loading menu...</div>
+    </div>
+
+    <div class="cart">
+        <h2>🛒 Your Cart:</h2>
+        <div class="cart-box">
+            <div id="cart-items">
+                <div class="empty-cart">Your cart is empty — add some items!</div>
+            </div>
+            <div class="cart-total" id="cart-total" style="display:none;">
+                <span>Total:</span>
+                <span id="total-price">₹0</span>
+            </div>
+            <div class="order-form" id="order-form" style="display:none;">
+                <h3>📦 Delivery Details:</h3>
+                <input type="text" id="customer-name" placeholder="Your Full Name *">
+                <input type="tel" id="customer-phone" placeholder="Phone Number *">
+                <input type="text" id="customer-address" placeholder="Delivery Address *">
+                <button class="order-btn" onclick="placeOrder()">✅ Place Order</button>
+            </div>
+            <div class="success-box" id="success-box">
+                <h2>🎉 Order Placed!</h2>
+                <p id="success-name"></p>
+                <p id="success-address"></p>
+                <p id="success-total"></p>
+                <p style="margin-top:15px; color:#888;">ZEPPO will deliver soon! 🛵</p>
+                <br>
+                <a href="track.html" style="color:#ff6b00; font-weight:bold;">Track your order →</a>
+            </div>
+        </div>
+        <div class="back-link" style="margin-top:15px;">
+            <a href="index.html">← Back to Home</a>
+        </div>
+    </div>
+
+    <script>
+        if (!localStorage.getItem('token')) {
+            window.location.href = 'login.html';
+        }
+
+        let cart = [];
+        let currentRestaurant = null;
+
+        window.onload = async function() {
+            const params = new URLSearchParams(window.location.search);
+            const restaurantId = params.get('shop');
+            if (!restaurantId) { window.location.href = 'index.html'; return; }
+
+            const restRes = await fetch('/api/restaurants');
+            const restaurants = await restRes.json();
+            currentRestaurant = restaurants.find(r => r.id == restaurantId);
+            if (!currentRestaurant) { window.location.href = 'index.html'; return; }
+
+            document.getElementById('restaurant-name').textContent = currentRestaurant.emoji + ' ' + currentRestaurant.name;
+            document.getElementById('restaurant-category').textContent = currentRestaurant.category + ' • ' + currentRestaurant.address;
+            document.title = currentRestaurant.name + ' - ZEPPO';
+
+            const menuRes = await fetch('/api/menu/' + restaurantId);
+            const menuItems = await menuRes.json();
+            const menuSection = document.getElementById('menu-section');
+
+            if (menuItems.length === 0) {
+                menuSection.innerHTML = '<div class="no-menu">Menu coming soon! 🍽️</div>';
+                return;
+            }
+
+            const categories = {};
+            menuItems.forEach(item => {
+                if (!categories[item.category]) categories[item.category] = [];
+                categories[item.category].push(item);
+            });
+
+            let html = '';
+            for (const category in categories) {
+                html += `<div class="category-title">🍽️ ${category}</div>`;
+                categories[category].forEach(item => {
+                    html += `
+                        <div class="menu-item">
+                            <div class="item-info">
+                                <h3>${item.name}</h3>
+                                <p>${item.description || ''}</p>
+                            </div>
+                            <div style="display:flex;align-items:center;">
+                                <div class="item-price">₹${item.price}</div>
+                                <button class="add-btn" onclick="addToCart('${item.name}', ${item.price})">+ Add</button>
+                            </div>
+                        </div>
+                    `;
+                });
+            }
+            menuSection.innerHTML = html;
+        }
+
+        function addToCart(name, price) {
+            cart.push({ name, price });
+            updateCart();
+        }
+
+        function updateCart() {
+            const cartDiv = document.getElementById('cart-items');
+            const totalDiv = document.getElementById('cart-total');
+            const orderForm = document.getElementById('order-form');
+
+            if (cart.length === 0) {
+                cartDiv.innerHTML = '<div class="empty-cart">Your cart is empty — add some items!</div>';
+                totalDiv.style.display = 'none';
+                orderForm.style.display = 'none';
+                return;
+            }
+
+            let html = '';
+            let total = 0;
+            cart.forEach((item, i) => {
+                total += item.price;
+                html += `<div class="cart-item">
+                    <span>${item.name}</span>
+                    <span>₹${item.price} <button onclick="removeItem(${i})" style="background:none;border:none;color:red;cursor:pointer;font-size:16px;">×</button></span>
+                </div>`;
+            });
+
+            cartDiv.innerHTML = html;
+            document.getElementById('total-price').textContent = '₹' + total;
+            totalDiv.style.display = 'flex';
+            orderForm.style.display = 'block';
+        }
+
+        function removeItem(index) {
+            cart.splice(index, 1);
+            updateCart();
+        }
+
+        async function placeOrder() {
+            const name = document.getElementById('customer-name').value.trim();
+            const phone = document.getElementById('customer-phone').value.trim();
+            const address = document.getElementById('customer-address').value.trim();
+
+            if (!name || !phone || !address) {
+                alert('❌ Please fill all fields!');
+                return;
+            }
+
+            const total = cart.reduce((sum, item) => sum + item.price, 0);
+            const token = localStorage.getItem('token');
+
+            const response = await fetch('/api/order', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': 'Bearer ' + token
+                },
+                body: JSON.stringify({
+                    customer_name: name,
+                    customer_phone: phone,
+                    customer_address: address,
+                    restaurant_id: currentRestaurant.id,
+                    restaurant_name: currentRestaurant.name,
+                    items: cart,
+                    total: total
+                })
+            });
+
+            const result = await response.json();
+
+            if (result.success) {
+                document.getElementById('order-form').style.display = 'none';
+                document.getElementById('cart-total').style.display = 'none';
+                document.getElementById('cart-items').style.display = 'none';
+                document.getElementById('success-name').textContent = '👤 Name: ' + name;
+                document.getElementById('success-address').textContent = '📍 Address: ' + address;
+                document.getElementById('success-total').textContent = '💰 Total: ₹' + total;
+                document.getElementById('success-box').style.display = 'block';
+                cart = [];
+            }
+        }
+    </script>
+</body>
+</html>

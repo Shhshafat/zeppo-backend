@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Delivery Boy - ZEPPO</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: Arial, sans-serif; background-color: #f5f5f5; }
+        header { background-color: #ff6b00; color: white; padding: 15px 20px; display: flex; justify-content: space-between; align-items: center; }
+        header h1 { font-size: 22px; }
+        header span { font-size: 14px; opacity: 0.9; }
+        .container { max-width: 600px; margin: 20px auto; padding: 0 15px; }
+        .stats { display: flex; gap: 15px; margin-bottom: 20px; }
+        .stat { background: white; border-radius: 12px; padding: 15px; flex: 1; text-align: center; box-shadow: 0 2px 8px rgba(0,0,0,0.08); border-left: 4px solid #ff6b00; }
+        .stat h2 { font-size: 28px; color: #ff6b00; }
+        .stat p { font-size: 13px; color: #888; margin-top: 3px; }
+        .order-card { background: white; border-radius: 12px; padding: 20px; margin-bottom: 15px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+        .order-card h3 { font-size: 16px; color: #333; margin-bottom: 8px; }
+        .order-card p { font-size: 13px; color: #666; margin-bottom: 5px; }
+        .order-card .total { font-size: 16px; font-weight: bold; color: #ff6b00; margin: 10px 0; }
+        .badge { display: inline-block; padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: bold; margin-bottom: 10px; }
+        .badge-confirmed { background-color: #3498db; color: white; }
+        .badge-preparing { background-color: #f39c12; color: white; }
+        .badge-on_the_way { background-color: #9b59b6; color: white; }
+        .badge-delivered { background-color: #27ae60; color: white; }
+        .btn-group { display: flex; gap: 10px; flex-wrap: wrap; }
+        .btn { padding: 10px 20px; border: none; border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: bold; flex: 1; }
+        .btn-accept { background-color: #27ae60; color: white; }
+        .btn-pickup { background-color: #9b59b6; color: white; }
+        .btn-deliver { background-color: #ff6b00; color: white; }
+        .no-orders { text-align: center; padding: 50px 20px; color: #aaa; }
+        .no-orders h2 { font-size: 20px; margin-bottom: 10px; }
+        .loading { text-align: center; color: #aaa; padding: 40px; }
+        .login-box { max-width: 400px; margin: 50px auto; background: white; padding: 30px; border-radius: 16px; box-shadow: 0 4px 20px rgba(0,0,0,0.1); text-align: center; }
+        .login-box h2 { color: #ff6b00; margin-bottom: 20px; }
+        .login-box input { width: 100%; padding: 10px 15px; border: 1px solid #ddd; border-radius: 8px; font-size: 15px; margin-bottom: 12px; outline: none; }
+        .login-box input:focus { border-color: #ff6b00; }
+        .login-box button { width: 100%; padding: 12px; background-color: #ff6b00; color: white; border: none; border-radius: 8px; font-size: 16px; cursor: pointer; }
+        .items-list { font-size: 13px; color: #555; margin: 8px 0; background: #f9f9f9; padding: 8px 12px; border-radius: 8px; }
+    </style>
+</head>
+<body>
+
+    <!-- Login Box -->
+    <div id="login-section">
+        <div class="login-box">
+            <h2>🛵 Delivery Boy Login</h2>
+            <input type="email" id="login-email" placeholder="Email">
+            <input type="password" id="login-password" placeholder="Password">
+            <button onclick="deliveryLogin()">Login</button>
+            <p id="login-error" style="color:red;margin-top:10px;display:none;"></p>
+        </div>
+    </div>
+
+    <!-- Dashboard -->
+    <div id="dashboard-section" style="display:none;">
+        <header>
+            <h1>🛵 ZEPPO Delivery</h1>
+            <span id="boy-name"></span>
+        </header>
+
+        <div class="container">
+            <div class="stats">
+                <div class="stat">
+                    <h2 id="active-count">0</h2>
+                    <p>Active Orders</p>
+                </div>
+                <div class="stat">
+                    <h2 id="delivered-count">0</h2>
+                    <p>Delivered Today</p>
+                </div>
+            </div>
+
+            <div id="orders-container">
+                <div class="loading">Loading orders...</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let deliveryToken = localStorage.getItem('delivery_token');
+        let deliveryName = localStorage.getItem('delivery_name');
+
+        if (deliveryToken) {
+            showDashboard();
+        }
+
+        async function deliveryLogin() {
+            const email = document.getElementById('login-email').value.trim();
+            const password = document.getElementById('login-password').value.trim();
+
+            if (!email || !password) {
+                showLoginError('Please fill all fields!');
+                return;
+            }
+
+            const res = await fetch('/api/login', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ email, password })
+            });
+
+            const data = await res.json();
+
+            if (data.success) {
+                localStorage.setItem('delivery_token', data.token);
+                localStorage.setItem('delivery_name', data.name);
+                deliveryToken = data.token;
+                deliveryName = data.name;
+                showDashboard();
+            } else {
+                showLoginError(data.message);
+            }
+        }
+
+        function showLoginError(msg) {
+            const err = document.getElementById('login-error');
+            err.textContent = msg;
+            err.style.display = 'block';
+        }
+
+        function showDashboard() {
+            document.getElementById('login-section').style.display = 'none';
+            document.getElementById('dashboard-section').style.display = 'block';
+            document.getElementById('boy-name').textContent = '👤 ' + (deliveryName || '');
+            loadOrders();
+        }
+
+        async function loadOrders() {
+            const res = await fetch('/api/delivery-orders', {
+                headers: { 'Authorization': 'Bearer ' + deliveryToken }
+            });
+            const orders = await res.json();
+            const container = document.getElementById('orders-container');
+
+            const activeOrders = orders.filter(o => o.status !== 'delivered' && o.status !== 'pending');
+            const deliveredOrders = orders.filter(o => o.status === 'delivered');
+
+            document.getElementById('active-count').textContent = activeOrders.length;
+            document.getElementById('delivered-count').textContent = deliveredOrders.length;
+
+            const showOrders = orders.filter(o => o.status !== 'delivered');
+
+            if (showOrders.length === 0) {
+                container.innerHTML = `
+                    <div class="no-orders">
+                        <h2>No active orders!</h2>
+                        <p>Waiting for new orders... 🕐</p>
+                    </div>
+                `;
+                return;
+            }
+
+            container.innerHTML = showOrders.map(o => {
+                let items = [];
+                try { items = JSON.parse(o.items); } catch(e) {}
+
+                return `
+                    <div class="order-card">
+                        <span class="badge badge-${o.status}">${o.status.replace('_', ' ').toUpperCase()}</span>
+                        <h3>🍽️ ${o.restaurant_name || 'Restaurant'}</h3>
+                        <p>👤 ${o.customer_name}</p>
+                        <p>📞 <a href="tel:${o.customer_phone}">${o.customer_phone}</a></p>
+                        <p>📍 ${o.customer_address}</p>
+                        <div class="items-list">
+                            ${items.map(i => `${i.name} — ₹${i.price}`).join('<br>')}
+                        </div>
+                        <div class="total">Total: ₹${o.total}</div>
+                        <div class="btn-group">
+                            ${o.status === 'confirmed' ? `<button class="btn btn-accept" onclick="updateStatus(${o.id}, 'preparing')">👨‍🍳 Start Preparing</button>` : ''}
+                            ${o.status === 'preparing' ? `<button class="btn btn-pickup" onclick="updateStatus(${o.id}, 'on_the_way')">🛵 Picked Up</button>` : ''}
+                            ${o.status === 'on_the_way' ? `<button class="btn btn-deliver" onclick="updateStatus(${o.id}, 'delivered')">✅ Delivered</button>` : ''}
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        async function updateStatus(id, status) {
+            await fetch('/api/orders/status', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id, status })
+            });
+            loadOrders();
+        }
+
+        // Auto refresh every 30 seconds
+        setInterval(loadOrders, 30000);
+    </script>
+</body>
+</html>

@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Track Order - ZEPPO</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: Arial, sans-serif; background-color: #f5f5f5; }
+        header { background-color: #ff6b00; color: white; text-align: center; padding: 20px 15px; }
+        header h1 { font-size: 28px; }
+        header p { font-size: 13px; margin-top: 5px; }
+        .container { max-width: 600px; margin: 30px auto; padding: 0 15px; }
+        .order-card { background: white; border-radius: 12px; padding: 20px; margin-bottom: 15px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+        .order-card h3 { font-size: 16px; color: #333; margin-bottom: 5px; }
+        .order-card p { font-size: 13px; color: #888; margin-bottom: 3px; }
+        .order-card .total { font-size: 16px; font-weight: bold; color: #ff6b00; margin-top: 8px; }
+        .tracking { margin-top: 15px; }
+        .step { display: flex; align-items: center; gap: 15px; margin-bottom: 15px; }
+        .step-icon { width: 40px; height: 40px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 18px; flex-shrink: 0; }
+        .step-icon.done { background-color: #27ae60; }
+        .step-icon.active { background-color: #ff6b00; }
+        .step-icon.pending { background-color: #ddd; }
+        .step-info h4 { font-size: 14px; color: #333; }
+        .step-info p { font-size: 12px; color: #888; }
+        .step-line { width: 2px; height: 20px; background-color: #ddd; margin-left: 19px; }
+        .step-line.done { background-color: #27ae60; }
+        .no-orders { text-align: center; padding: 50px 20px; color: #aaa; }
+        .no-orders h2 { font-size: 20px; margin-bottom: 10px; }
+        .back-link { text-align: center; margin-top: 20px; }
+        .back-link a { color: #ff6b00; text-decoration: none; font-size: 14px; }
+        .loading { text-align: center; color: #aaa; padding: 40px; }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>⚡ ZEPPO</h1>
+        <p>Track Your Orders</p>
+    </header>
+
+    <div class="container">
+        <div id="orders-container">
+            <div class="loading">Loading your orders...</div>
+        </div>
+        <div class="back-link">
+            <a href="index.html">← Back to Home</a>
+        </div>
+    </div>
+
+    <script>
+        if (!localStorage.getItem('token')) {
+            window.location.href = 'login.html';
+        }
+
+        const statusSteps = {
+            'pending':   { step: 1, label: 'Order Placed' },
+            'confirmed': { step: 2, label: 'Confirmed' },
+            'preparing': { step: 3, label: 'Preparing' },
+            'on_the_way': { step: 4, label: 'On the Way' },
+            'delivered': { step: 5, label: 'Delivered' }
+        };
+
+        function getStepClass(stepNum, currentStep) {
+            if (stepNum < currentStep) return 'done';
+            if (stepNum === currentStep) return 'active';
+            return 'pending';
+        }
+
+        function renderTracking(status) {
+            const current = statusSteps[status]?.step || 1;
+            const steps = [
+                { icon: '📝', label: 'Order Placed', desc: 'Your order has been received' },
+                { icon: '✅', label: 'Confirmed', desc: 'Restaurant confirmed your order' },
+                { icon: '👨‍🍳', label: 'Preparing', desc: 'Your food is being prepared' },
+                { icon: '🛵', label: 'On the Way', desc: 'Delivery boy is on the way' },
+                { icon: '🎉', label: 'Delivered', desc: 'Order delivered successfully' }
+            ];
+
+            let html = '<div class="tracking">';
+            steps.forEach((step, i) => {
+                const stepNum = i + 1;
+                const cls = getStepClass(stepNum, current);
+                html += `
+                    <div class="step">
+                        <div class="step-icon ${cls}">${step.icon}</div>
+                        <div class="step-info">
+                            <h4>${step.label}</h4>
+                            <p>${step.desc}</p>
+                        </div>
+                    </div>
+                    ${i < steps.length - 1 ? `<div class="step-line ${stepNum < current ? 'done' : ''}"></div>` : ''}
+                `;
+            });
+            html += '</div>';
+            return html;
+        }
+
+        async function loadOrders() {
+            const token = localStorage.getItem('token');
+            const res = await fetch('/api/my-orders', {
+                headers: { 'Authorization': 'Bearer ' + token }
+            });
+            const orders = await res.json();
+            const container = document.getElementById('orders-container');
+
+            if (orders.length === 0) {
+                container.innerHTML = `
+                    <div class="no-orders">
+                        <h2>No orders yet!</h2>
+                        <p>Order something delicious 😋</p>
+                        <br>
+                        <a href="index.html" style="color:#ff6b00;">Browse Restaurants →</a>
+                    </div>
+                `;
+                return;
+            }
+
+            container.innerHTML = orders.map(o => `
+                <div class="order-card">
+                    <h3>🍽️ ${o.restaurant_name}</h3>
+                    <p>📍 Delivery to: ${o.customer_address}</p>
+                    <p>🕐 ${o.created_at}</p>
+                    <div class="total">₹${o.total}</div>
+                    ${renderTracking(o.status)}
+                </div>
+            `).join('');
+        }
+
+        loadOrders();
+
+        // Auto refresh every 30 seconds
+        setInterval(loadOrders, 30000);
+    </script>
+</body>
+</html>

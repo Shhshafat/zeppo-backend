@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ZEPPO</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Segoe UI', Arial, sans-serif; background: #fff; max-width: 480px; margin: 0 auto; min-height: 100vh; position: relative; padding-bottom: 70px; }
+
+        /* Top bar */
+        .topbar { padding: 15px 16px 10px; display: flex; justify-content: space-between; align-items: center; }
+        .location { flex: 1; }
+        .location h3 { font-size: 16px; font-weight: 700; color: #333; display: flex; align-items: center; gap: 5px; }
+        .location h3 span { color: #ff6b00; }
+        .location p { font-size: 12px; color: #888; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 220px; }
+        .topbar-right { display: flex; align-items: center; gap: 10px; }
+        .avatar { width: 36px; height: 36px; border-radius: 50%; background: #f0f0f0; display: flex; align-items: center; justify-content: center; font-size: 18px; cursor: pointer; }
+
+        /* Tabs */
+        .tabs { display: flex; margin: 0 16px 15px; border-radius: 12px; overflow: hidden; border: 1px solid #e0e0e0; }
+        .tab { flex: 1; padding: 12px; text-align: center; cursor: pointer; font-size: 14px; font-weight: 600; color: #888; background: #f9f9f9; display: flex; flex-direction: column; align-items: center; gap: 4px; }
+        .tab.active { background: white; color: #333; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+        .tab span { font-size: 22px; }
+
+        /* Search */
+        .search-box { margin: 0 16px 15px; display: flex; gap: 10px; align-items: center; }
+        .search-input { flex: 1; display: flex; align-items: center; gap: 8px; background: #f5f5f5; border-radius: 10px; padding: 12px 15px; }
+        .search-input input { border: none; background: none; outline: none; font-size: 14px; color: #333; width: 100%; }
+        .search-input .search-icon { color: #888; font-size: 16px; }
+        .veg-toggle { display: flex; flex-direction: column; align-items: center; gap: 3px; background: white; border: 1px solid #e0e0e0; border-radius: 10px; padding: 8px 12px; cursor: pointer; }
+        .veg-toggle span { font-size: 10px; font-weight: 600; color: #333; }
+        .toggle { width: 32px; height: 18px; background: #e0e0e0; border-radius: 10px; position: relative; }
+        .toggle.on { background: #60b246; }
+        .toggle::after { content: ''; width: 14px; height: 14px; background: white; border-radius: 50%; position: absolute; top: 2px; left: 2px; transition: 0.2s; }
+        .toggle.on::after { left: 16px; }
+
+        /* Banner */
+        .banner { margin: 0 16px 20px; background: linear-gradient(135deg, #1a1a2e, #16213e); border-radius: 16px; padding: 20px; color: white; position: relative; overflow: hidden; }
+        .banner h2 { font-size: 20px; font-weight: 700; line-height: 1.3; max-width: 200px; }
+        .banner h2 span { color: #ff6b00; }
+        .banner-coin { position: absolute; right: 15px; top: 50%; transform: translateY(-50%); width: 70px; height: 70px; background: linear-gradient(135deg, #ffd700, #ff8c00); border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 22px; box-shadow: 0 4px 15px rgba(255,140,0,0.4); }
+
+        /* Section title */
+        .section-title { padding: 0 16px; font-size: 18px; font-weight: 700; color: #333; margin-bottom: 15px; }
+
+        /* Categories */
+        .categories { display: flex; gap: 15px; overflow-x: auto; padding: 0 16px 5px; margin-bottom: 20px; scrollbar-width: none; }
+        .categories::-webkit-scrollbar { display: none; }
+        .category { display: flex; flex-direction: column; align-items: center; gap: 8px; cursor: pointer; min-width: 70px; }
+        .category-img { width: 70px; height: 70px; border-radius: 50%; background: #f5f5f5; display: flex; align-items: center; justify-content: center; font-size: 30px; overflow: hidden; }
+        .category-img img { width: 100%; height: 100%; object-fit: cover; }
+        .category p { font-size: 12px; color: #333; font-weight: 500; text-align: center; }
+
+        /* Restaurant cards */
+        .restaurants { padding: 0 16px; }
+        .rest-card { display: flex; gap: 12px; padding: 15px 0; border-bottom: 1px solid #f5f5f5; cursor: pointer; }
+        .rest-card:hover { background: #fafafa; }
+        .rest-img { width: 90px; height: 90px; border-radius: 12px; background: #f5f5f5; display: flex; align-items: center; justify-content: center; font-size: 36px; flex-shrink: 0; overflow: hidden; }
+        .rest-info { flex: 1; }
+        .rest-info h3 { font-size: 16px; font-weight: 700; color: #333; margin-bottom: 4px; }
+        .rest-meta { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+        .rating { display: flex; align-items: center; gap: 3px; background: #48c479; color: white; padding: 2px 6px; border-radius: 4px; font-size: 12px; font-weight: 700; }
+        .time { font-size: 12px; color: #888; }
+        .rest-info p { font-size: 13px; color: #888; }
+        .rest-offer { font-size: 12px; color: #ff6b00; font-weight: 600; margin-top: 4px; }
+        .order-btn { align-self: center; background: #ff6b00; color: white; border: none; padding: 8px 16px; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer; white-space: nowrap; }
+
+        /* Bottom nav */
+        .bottom-nav { position: fixed; bottom: 0; left: 50%; transform: translateX(-50%); width: 100%; max-width: 480px; background: white; border-top: 1px solid #f0f0f0; display: flex; z-index: 100; box-shadow: 0 -2px 10px rgba(0,0,0,0.08); }
+        .nav-item { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 3px; padding: 10px 5px; cursor: pointer; color: #888; font-size: 11px; }
+        .nav-item.active { color: #ff6b00; }
+        .nav-item span { font-size: 22px; }
+
+        .loading { text-align: center; color: #aaa; padding: 40px; }
+        .no-rest { text-align: center; padding: 40px; color: #888; }
+    </style>
+</head>
+<body>
+
+    <!-- Top bar -->
+    <div class="topbar">
+        <div class="location">
+            <h3>📍 Kupwara <span>▾</span></h3>
+            <p id="user-location">Kupwara, Jammu & Kashmir</p>
+        </div>
+        <div class="topbar-right">
+            <div class="avatar" onclick="goToProfile()">👤</div>
+        </div>
+    </div>
+
+    <!-- Tabs -->
+    <div class="tabs">
+        <div class="tab active">
+            <span>🍔</span>
+            Food
+        </div>
+        <div class="tab">
+            <span>🍽️</span>
+            Dineout
+        </div>
+    </div>
+
+    <!-- Search -->
+    <div class="search-box">
+        <div class="search-input">
+            <span class="search-icon">🔍</span>
+            <input type="text" id="search" placeholder="Search for 'Biryani'" oninput="searchRestaurants()">
+        </div>
+        <div class="veg-toggle" onclick="toggleVeg()">
+            <span>VEG</span>
+            <div class="toggle" id="veg-toggle"></div>
+        </div>
+    </div>
+
+    <!-- Banner -->
+    <div class="banner">
+        <h2>ZEPPO — <span>Ghar tak,</span> jhatpat!</h2>
+        <p style="font-size:13px;margin-top:8px;opacity:0.8;">Kupwara ka pehla delivery app ⚡</p>
+        <div class="banner-coin">⚡</div>
+    </div>
+
+    <!-- Categories -->
+    <div class="section-title">What's on your mind?</div>
+    <div class="categories">
+        <div class="category" onclick="filterCategory('Biryani')">
+            <div class="category-img">🍚</div>
+            <p>Biryani</p>
+        </div>
+        <div class="category" onclick="filterCategory('Gravy')">
+            <div class="category-img">🍲</div>
+            <p>Gravy</p>
+        </div>
+        <div class="category" onclick="filterCategory('Tandoori')">
+            <div class="category-img">🔥</div>
+            <p>Tandoori</p>
+        </div>
+        <div class="category" onclick="filterCategory('Tikka')">
+            <div class="category-img">🍢</div>
+            <p>Tikka</p>
+        </div>
+        <div class="category" onclick="filterCategory('Pizza')">
+            <div class="category-img">🍕</div>
+            <p>Pizza</p>
+        </div>
+        <div class="category" onclick="filterCategory('Burger')">
+            <div class="category-img">🍔</div>
+            <p>Burger</p>
+        </div>
+        <div class="category" onclick="filterCategory('Drinks')">
+            <div class="category-img">🥤</div>
+            <p>Drinks</p>
+        </div>
+        <div class="category" onclick="loadRestaurants()">
+            <div class="category-img">🍽️</div>
+            <p>All</p>
+        </div>
+    </div>
+
+    <!-- Restaurants -->
+    <div class="section-title">Restaurants near you</div>
+    <div class="restaurants" id="restaurants-list">
+        <div class="loading">Loading restaurants...</div>
+    </div>
+
+    <!-- Bottom Nav -->
+    <div class="bottom-nav">
+        <div class="nav-item active">
+            <span>🏠</span>
+            Home
+        </div>
+        <div class="nav-item" onclick="window.location.href='track.html'">
+            <span>📦</span>
+            Orders
+        </div>
+        <div class="nav-item" onclick="window.location.href='delivery-signup.html'">
+            <span>🛵</span>
+            Partner
+        </div>
+        <div class="nav-item" onclick="goToProfile()">
+            <span>👤</span>
+            Profile
+        </div>
+    </div>
+
+    <script>
+        // Auth check
+        if (!localStorage.getItem('token')) {
+            window.location.href = 'login.html';
+        }
+
+        let allRestaurants = [];
+        let vegMode = false;
+
+        function toggleVeg() {
+            vegMode = !vegMode;
+            document.getElementById('veg-toggle').classList.toggle('on', vegMode);
+        }
+
+        function goToProfile() {
+            const name = localStorage.getItem('name');
+            const role = localStorage.getItem('role');
+            if (role === 'admin') {
+                window.location.href = 'admin.html';
+            } else {
+                alert('👤 ' + (name || 'User') + '\n\nClick OK to logout');
+                if (confirm('Logout karna chahte ho?')) {
+                    localStorage.clear();
+                    window.location.href = 'login.html';
+                }
+            }
+        }
+
+        async function loadRestaurants() {
+            const res = await fetch('/api/restaurants');
+            allRestaurants = await res.json();
+            displayRestaurants(allRestaurants);
+        }
+
+        function displayRestaurants(list) {
+            const container = document.getElementById('restaurants-list');
+            if (list.length === 0) {
+                container.innerHTML = '<div class="no-rest">No restaurants found 😔<br><br><small>Admin se restaurants add karwao!</small></div>';
+                return;
+            }
+            container.innerHTML = list.map(r => `
+                <div class="rest-card">
+                    <div class="rest-img">${r.emoji}</div>
+                    <div class="rest-info">
+                        <h3>${r.name}</h3>
+                        <div class="rest-meta">
+                            <span class="rating">⭐ ${r.rating}</span>
+                            <span class="time">🕐 30-40 min</span>
+                        </div>
+                        <p>${r.category} • ${r.address}</p>
+                        <p class="rest-offer">🎉 Free delivery on first order!</p>
+                    </div>
+                    <button class="order-btn" onclick="window.location.href='order.html?shop=${r.id}'">Order</button>
+                </div>
+            `).join('');
+        }
+
+        function searchRestaurants() {
+            const q = document.getElementById('search').value.toLowerCase();
+            displayRestaurants(allRestaurants.filter(r =>
+                r.name.toLowerCase().includes(q) || r.category.toLowerCase().includes(q)
+            ));
+        }
+
+        function filterCategory(cat) {
+            displayRestaurants(allRestaurants.filter(r =>
+                r.category.toLowerCase().includes(cat.toLowerCase())
+            ));
+        }
+
+        loadRestaurants();
+    </script>
+</body>
+</html>

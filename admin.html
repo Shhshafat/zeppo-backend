@@ -1,0 +1,556 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ZEPPO Admin</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Segoe UI', Arial, sans-serif; background: #f4f6f9; display: flex; min-height: 100vh; }
+
+        /* Sidebar */
+        .sidebar { width: 240px; background: #1a1a2e; min-height: 100vh; padding: 20px 0; position: fixed; left: 0; top: 0; z-index: 100; }
+        .sidebar-logo { padding: 10px 20px 25px 20px; border-bottom: 1px solid #2d2d44; }
+        .sidebar-logo h1 { color: #ff6b00; font-size: 24px; }
+        .sidebar-logo p { color: #aaa; font-size: 12px; margin-top: 3px; }
+        .sidebar-menu { padding: 15px 0; }
+        .menu-label { color: #555; font-size: 11px; padding: 10px 20px 5px 20px; text-transform: uppercase; letter-spacing: 1px; }
+        .menu-item { display: flex; align-items: center; gap: 12px; padding: 12px 20px; color: #aaa; cursor: pointer; transition: all 0.2s; font-size: 14px; }
+        .menu-item:hover { background: #2d2d44; color: white; }
+        .menu-item.active { background: #ff6b00; color: white; border-radius: 0 25px 25px 0; margin-right: 15px; }
+        .menu-item .icon { font-size: 18px; width: 24px; }
+
+        /* Main */
+        .main { margin-left: 240px; flex: 1; }
+
+        /* Topbar */
+        .topbar { background: white; padding: 15px 30px; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 1px 4px rgba(0,0,0,0.08); position: sticky; top: 0; z-index: 99; }
+        .topbar-left { display: flex; align-items: center; gap: 15px; }
+        .topbar-left h2 { font-size: 20px; color: #333; }
+        .topbar-right { display: flex; align-items: center; gap: 15px; }
+        .topbar-right .user { display: flex; align-items: center; gap: 8px; background: #ff6b00; color: white; padding: 8px 15px; border-radius: 25px; font-size: 14px; }
+
+        /* Content */
+        .content { padding: 25px 30px; }
+
+        /* Stats */
+        .stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; margin-bottom: 25px; }
+        .stat-card { background: white; border-radius: 16px; padding: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); display: flex; justify-content: space-between; align-items: center; }
+        .stat-card .info h3 { font-size: 13px; color: #888; margin-bottom: 5px; }
+        .stat-card .info h2 { font-size: 28px; font-weight: bold; color: #333; }
+        .stat-card .info p { font-size: 12px; color: #27ae60; margin-top: 3px; }
+        .stat-card .icon-box { width: 55px; height: 55px; border-radius: 12px; display: flex; align-items: center; justify-content: center; font-size: 24px; }
+        .icon-orange { background: #fff3e0; }
+        .icon-green { background: #e8f5e9; }
+        .icon-blue { background: #e3f2fd; }
+        .icon-purple { background: #f3e5f5; }
+
+        /* Charts */
+        .charts-grid { display: grid; grid-template-columns: 2fr 1fr; gap: 20px; margin-bottom: 25px; }
+        .chart-card { background: white; border-radius: 16px; padding: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
+        .chart-card h3 { font-size: 15px; color: #333; margin-bottom: 15px; font-weight: 600; }
+
+        /* Tables */
+        .table-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 25px; }
+        .table-card { background: white; border-radius: 16px; padding: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
+        .table-card h3 { font-size: 15px; color: #333; margin-bottom: 15px; font-weight: 600; display: flex; justify-content: space-between; }
+        .table-card h3 span { font-size: 12px; color: #ff6b00; cursor: pointer; }
+        table { width: 100%; border-collapse: collapse; }
+        table th { text-align: left; padding: 10px 8px; font-size: 12px; color: #888; border-bottom: 1px solid #f0f0f0; }
+        table td { padding: 12px 8px; font-size: 13px; color: #333; border-bottom: 1px solid #f9f9f9; }
+        .badge { padding: 3px 10px; border-radius: 20px; font-size: 11px; font-weight: bold; }
+        .badge-pending { background: #fff3cd; color: #856404; }
+        .badge-confirmed { background: #cfe2ff; color: #084298; }
+        .badge-preparing { background: #e2d9f3; color: #6f42c1; }
+        .badge-on_the_way { background: #ffd700; color: #333; }
+        .badge-delivered { background: #d1e7dd; color: #0a3622; }
+        .badge-approved { background: #d1e7dd; color: #0a3622; }
+        .badge-rejected { background: #f8d7da; color: #842029; }
+        .btn { padding: 5px 12px; border: none; border-radius: 6px; cursor: pointer; font-size: 12px; }
+        .btn-confirm { background: #cfe2ff; color: #084298; }
+        .btn-approve { background: #d1e7dd; color: #0a3622; }
+        .btn-reject { background: #f8d7da; color: #842029; }
+        .btn-delete { background: #f8d7da; color: #842029; }
+        .btn-orange { background: #ff6b00; color: white; padding: 8px 16px; border-radius: 8px; border: none; cursor: pointer; font-size: 13px; }
+
+        /* Section pages */
+        .page { display: none; }
+        .page.active { display: block; }
+
+        /* Forms */
+        .add-form { background: white; border-radius: 16px; padding: 20px; margin-bottom: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
+        .add-form h3 { font-size: 15px; color: #333; margin-bottom: 15px; }
+        .form-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
+        .add-form input, .add-form select { width: 100%; padding: 10px 14px; border: 1px solid #e0e0e0; border-radius: 8px; font-size: 14px; outline: none; }
+        .add-form input:focus, .add-form select:focus { border-color: #ff6b00; }
+        .full-table { background: white; border-radius: 16px; padding: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
+        .full-table h3 { font-size: 15px; color: #333; margin-bottom: 15px; }
+        .loading { text-align: center; color: #aaa; padding: 20px; }
+        .empty { text-align: center; color: #aaa; padding: 30px; }
+    </style>
+</head>
+<body>
+
+    <!-- Sidebar -->
+    <div class="sidebar">
+        <div class="sidebar-logo">
+            <h1>⚡ ZEPPO</h1>
+            <p>Admin Dashboard</p>
+        </div>
+        <div class="sidebar-menu">
+            <div class="menu-label">Main</div>
+            <div class="menu-item active" onclick="showPage('dashboard', this)">
+                <span class="icon">📊</span> Dashboard
+            </div>
+            <div class="menu-item" onclick="showPage('orders', this)">
+                <span class="icon">📦</span> Orders
+            </div>
+            <div class="menu-item" onclick="showPage('restaurants', this)">
+                <span class="icon">🏪</span> Restaurants
+            </div>
+            <div class="menu-item" onclick="showPage('menu', this)">
+                <span class="icon">🍽️</span> Menu
+            </div>
+            <div class="menu-label">People</div>
+            <div class="menu-item" onclick="showPage('applications', this)">
+                <span class="icon">📝</span> Applications
+            </div>
+            <div class="menu-item" onclick="showPage('users', this)">
+                <span class="icon">👥</span> Users
+            </div>
+            <div class="menu-label">Other</div>
+            <div class="menu-item" onclick="window.location.href='index.html'">
+                <span class="icon">🏠</span> Go to App
+            </div>
+            <div class="menu-item" onclick="logout()">
+                <span class="icon">🚪</span> Logout
+            </div>
+        </div>
+    </div>
+
+    <!-- Main -->
+    <div class="main">
+        <div class="topbar">
+            <div class="topbar-left">
+                <h2 id="page-title">Dashboard</h2>
+            </div>
+            <div class="topbar-right">
+                <div class="user">👤 Shafat — Admin</div>
+            </div>
+        </div>
+
+        <div class="content">
+
+            <!-- Dashboard Page -->
+            <div class="page active" id="page-dashboard">
+
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="info">
+                            <h3>Total Orders</h3>
+                            <h2 id="total-orders">0</h2>
+                            <p>↑ All time</p>
+                        </div>
+                        <div class="icon-box icon-orange">📦</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="info">
+                            <h3>Total Revenue</h3>
+                            <h2 id="total-revenue">₹0</h2>
+                            <p>↑ Delivered orders</p>
+                        </div>
+                        <div class="icon-box icon-green">💰</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="info">
+                            <h3>Restaurants</h3>
+                            <h2 id="total-restaurants">0</h2>
+                            <p>↑ Active</p>
+                        </div>
+                        <div class="icon-box icon-blue">🏪</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="info">
+                            <h3>Total Users</h3>
+                            <h2 id="total-users">0</h2>
+                            <p>↑ Registered</p>
+                        </div>
+                        <div class="icon-box icon-purple">👥</div>
+                    </div>
+                </div>
+
+                <div class="charts-grid">
+                    <div class="chart-card">
+                        <h3>📈 Revenue Overview</h3>
+                        <canvas id="revenueChart" height="100"></canvas>
+                    </div>
+                    <div class="chart-card">
+                        <h3>📊 Orders by Status</h3>
+                        <canvas id="statusChart"></canvas>
+                    </div>
+                </div>
+
+                <div class="table-grid">
+                    <div class="table-card">
+                        <h3>📦 Recent Orders <span onclick="showPage('orders', document.querySelector('.menu-item:nth-child(3)'))">View All →</span></h3>
+                        <table>
+                            <tr>
+                                <th>Customer</th>
+                                <th>Restaurant</th>
+                                <th>Total</th>
+                                <th>Status</th>
+                            </tr>
+                            <tbody id="recent-orders"></tbody>
+                        </table>
+                    </div>
+                    <div class="table-card">
+                        <h3>🏪 Top Restaurants <span>By Orders</span></h3>
+                        <table>
+                            <tr>
+                                <th>#</th>
+                                <th>Restaurant</th>
+                                <th>Orders</th>
+                                <th>Revenue</th>
+                            </tr>
+                            <tbody id="top-restaurants"></tbody>
+                        </table>
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- Orders Page -->
+            <div class="page" id="page-orders">
+                <div class="full-table">
+                    <h3>📦 All Orders</h3>
+                    <table>
+                        <tr>
+                            <th>ID</th>
+                            <th>Customer</th>
+                            <th>Phone</th>
+                            <th>Address</th>
+                            <th>Restaurant</th>
+                            <th>Total</th>
+                            <th>Status</th>
+                            <th>Time</th>
+                            <th>Action</th>
+                        </tr>
+                        <tbody id="orders-table"></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Restaurants Page -->
+            <div class="page" id="page-restaurants">
+                <div class="add-form">
+                    <h3>➕ Add New Restaurant</h3>
+                    <div class="form-grid">
+                        <input type="text" id="rest-name" placeholder="Restaurant Name *">
+                        <input type="text" id="rest-category" placeholder="Type (e.g. Fast Food) *">
+                        <input type="text" id="rest-emoji" placeholder="Emoji (e.g. 🍗) *">
+                        <input type="text" id="rest-address" placeholder="Address *">
+                    </div>
+                    <br>
+                    <button class="btn-orange" onclick="addRestaurant()">➕ Add Restaurant</button>
+                </div>
+                <div class="full-table">
+                    <h3>🏪 All Restaurants</h3>
+                    <table>
+                        <tr><th>ID</th><th>Emoji</th><th>Name</th><th>Type</th><th>Address</th><th>Rating</th><th>Action</th></tr>
+                        <tbody id="restaurants-table"></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Menu Page -->
+            <div class="page" id="page-menu">
+                <div class="add-form">
+                    <h3>➕ Add Menu Item</h3>
+                    <div class="form-grid">
+                        <select id="menu-restaurant"><option value="">-- Select Restaurant --</option></select>
+                        <input type="text" id="menu-category" placeholder="Category (Gravy, Tandoori) *">
+                        <input type="text" id="menu-name" placeholder="Item Name *">
+                        <input type="number" id="menu-price" placeholder="Price (₹) *">
+                        <input type="text" id="menu-description" placeholder="Description">
+                    </div>
+                    <br>
+                    <button class="btn-orange" onclick="addMenuItem()">➕ Add Item</button>
+                </div>
+                <div class="full-table">
+                    <h3>🍽️ All Menu Items</h3>
+                    <table>
+                        <tr><th>ID</th><th>Restaurant</th><th>Category</th><th>Item</th><th>Price</th><th>Action</th></tr>
+                        <tbody id="menu-table"></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Applications Page -->
+            <div class="page" id="page-applications">
+                <div class="full-table">
+                    <h3>📝 Delivery Boy Applications</h3>
+                    <table>
+                        <tr><th>ID</th><th>Name</th><th>Father</th><th>Phone</th><th>Address</th><th>Bike</th><th>Education</th><th>Status</th><th>Action</th></tr>
+                        <tbody id="applications-table"></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Users Page -->
+            <div class="page" id="page-users">
+                <div class="full-table">
+                    <h3>👥 All Users</h3>
+                    <table>
+                        <tr><th>ID</th><th>Name</th><th>Email</th><th>Phone</th><th>Role</th><th>Joined</th></tr>
+                        <tbody id="users-table"></tbody>
+                    </table>
+                </div>
+            </div>
+
+        </div>
+    </div>
+
+    <script>
+        let restaurants = [];
+        let revenueChartInstance, statusChartInstance;
+
+        function showPage(name, el) {
+            document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+            document.querySelectorAll('.menu-item').forEach(m => m.classList.remove('active'));
+            document.getElementById('page-' + name).classList.add('active');
+            if (el) el.classList.add('active');
+            const titles = { dashboard: 'Dashboard', orders: 'Orders', restaurants: 'Restaurants', menu: 'Menu', applications: 'Applications', users: 'Users' };
+            document.getElementById('page-title').textContent = titles[name] || name;
+        }
+
+        function logout() {
+            localStorage.clear();
+            window.location.href = 'login.html';
+        }
+
+        async function loadData() {
+            const [ordersRes, restRes, usersRes, appsRes] = await Promise.all([
+                fetch('/api/orders'),
+                fetch('/api/restaurants'),
+                fetch('/api/users'),
+                fetch('/api/applications')
+            ]);
+
+            const orders = await ordersRes.json();
+            restaurants = await restRes.json();
+            const users = await usersRes.json();
+            const apps = await appsRes.json();
+
+            // Stats
+            const revenue = orders.filter(o => o.status === 'delivered').reduce((s, o) => s + o.total, 0);
+            document.getElementById('total-orders').textContent = orders.length;
+            document.getElementById('total-revenue').textContent = '₹' + revenue;
+            document.getElementById('total-restaurants').textContent = restaurants.length;
+            document.getElementById('total-users').textContent = users.length;
+
+            // Charts
+            buildCharts(orders);
+
+            // Recent orders
+            const recentOrders = document.getElementById('recent-orders');
+            recentOrders.innerHTML = orders.slice(0, 5).map(o => `
+                <tr>
+                    <td>${o.customer_name}</td>
+                    <td>${o.restaurant_name || '-'}</td>
+                    <td>₹${o.total}</td>
+                    <td><span class="badge badge-${o.status}">${o.status}</span></td>
+                </tr>
+            `).join('') || '<tr><td colspan="4" class="empty">No orders yet</td></tr>';
+
+            // Top restaurants
+            const restOrders = {};
+            const restRevenue = {};
+            orders.forEach(o => {
+                if (o.restaurant_name) {
+                    restOrders[o.restaurant_name] = (restOrders[o.restaurant_name] || 0) + 1;
+                    if (o.status === 'delivered') restRevenue[o.restaurant_name] = (restRevenue[o.restaurant_name] || 0) + o.total;
+                }
+            });
+            const topRest = document.getElementById('top-restaurants');
+            const sorted = Object.entries(restOrders).sort((a, b) => b[1] - a[1]);
+            topRest.innerHTML = sorted.slice(0, 5).map(([name, count], i) => `
+                <tr>
+                    <td>#${i + 1}</td>
+                    <td>${name}</td>
+                    <td>${count}</td>
+                    <td>₹${restRevenue[name] || 0}</td>
+                </tr>
+            `).join('') || '<tr><td colspan="4" class="empty">No data</td></tr>';
+
+            // Orders table
+            document.getElementById('orders-table').innerHTML = orders.map(o => `
+                <tr>
+                    <td>#${o.id}</td>
+                    <td>${o.customer_name}</td>
+                    <td>${o.customer_phone}</td>
+                    <td>${o.customer_address}</td>
+                    <td>${o.restaurant_name || '-'}</td>
+                    <td>₹${o.total}</td>
+                    <td><span class="badge badge-${o.status}">${o.status}</span></td>
+                    <td>${o.created_at?.split('T')[0] || o.created_at}</td>
+                    <td>${o.status === 'pending' ? `<button class="btn btn-confirm" onclick="updateOrderStatus(${o.id},'confirmed')">Confirm</button>` : ''}</td>
+                </tr>
+            `).join('') || '<tr><td colspan="9" class="empty">No orders</td></tr>';
+
+            // Restaurants
+            const menuSelect = document.getElementById('menu-restaurant');
+            menuSelect.innerHTML = '<option value="">-- Select Restaurant --</option>' + restaurants.map(r => `<option value="${r.id}">${r.emoji} ${r.name}</option>`).join('');
+
+            document.getElementById('restaurants-table').innerHTML = restaurants.map(r => `
+                <tr>
+                    <td>#${r.id}</td>
+                    <td>${r.emoji}</td>
+                    <td>${r.name}</td>
+                    <td>${r.category}</td>
+                    <td>${r.address}</td>
+                    <td>⭐ ${r.rating}</td>
+                    <td><button class="btn btn-delete" onclick="deleteRestaurant(${r.id})">Delete</button></td>
+                </tr>
+            `).join('') || '<tr><td colspan="7" class="empty">No restaurants</td></tr>';
+
+            // Menu
+            let allMenu = [];
+            for (const r of restaurants) {
+                const res = await fetch('/api/menu/' + r.id);
+                const items = await res.json();
+                items.forEach(i => i.restaurant_name = r.name);
+                allMenu = allMenu.concat(items);
+            }
+            document.getElementById('menu-table').innerHTML = allMenu.map(i => `
+                <tr>
+                    <td>#${i.id}</td>
+                    <td>${i.restaurant_name}</td>
+                    <td>${i.category}</td>
+                    <td>${i.name}</td>
+                    <td>₹${i.price}</td>
+                    <td><button class="btn btn-delete" onclick="deleteMenuItem(${i.id})">Delete</button></td>
+                </tr>
+            `).join('') || '<tr><td colspan="6" class="empty">No menu items</td></tr>';
+
+            // Applications
+            document.getElementById('applications-table').innerHTML = apps.map(a => `
+                <tr>
+                    <td>#${a.id}</td>
+                    <td>${a.full_name}</td>
+                    <td>${a.father_name}</td>
+                    <td>${a.phone}</td>
+                    <td>${a.address}</td>
+                    <td>${a.has_bike}</td>
+                    <td>${a.education}</td>
+                    <td><span class="badge badge-${a.status}">${a.status}</span></td>
+                    <td>
+                        <button class="btn btn-approve" onclick="updateAppStatus(${a.id},'approved')">✅</button>
+                        <button class="btn btn-reject" onclick="updateAppStatus(${a.id},'rejected')">❌</button>
+                    </td>
+                </tr>
+            `).join('') || '<tr><td colspan="9" class="empty">No applications</td></tr>';
+
+            // Users
+            document.getElementById('users-table').innerHTML = users.map(u => `
+                <tr>
+                    <td>#${u.id}</td>
+                    <td>${u.name}</td>
+                    <td>${u.email}</td>
+                    <td>${u.phone}</td>
+                    <td><span class="badge badge-${u.role === 'admin' ? 'confirmed' : 'pending'}">${u.role}</span></td>
+                    <td>${u.created_at?.split('T')[0] || u.created_at}</td>
+                </tr>
+            `).join('') || '<tr><td colspan="6" class="empty">No users</td></tr>';
+        }
+
+        function buildCharts(orders) {
+            // Revenue by restaurant
+            const restRevenue = {};
+            orders.filter(o => o.status === 'delivered').forEach(o => {
+                if (o.restaurant_name) restRevenue[o.restaurant_name] = (restRevenue[o.restaurant_name] || 0) + o.total;
+            });
+
+            if (revenueChartInstance) revenueChartInstance.destroy();
+            revenueChartInstance = new Chart(document.getElementById('revenueChart'), {
+                type: 'line',
+                data: {
+                    labels: Object.keys(restRevenue).length ? Object.keys(restRevenue) : ['No Data'],
+                    datasets: [{
+                        label: 'Revenue (₹)',
+                        data: Object.values(restRevenue).length ? Object.values(restRevenue) : [0],
+                        borderColor: '#ff6b00',
+                        backgroundColor: 'rgba(255,107,0,0.1)',
+                        fill: true,
+                        tension: 0.4
+                    }]
+                },
+                options: { plugins: { legend: { display: false } }, scales: { x: { grid: { display: false } }, y: { grid: { color: '#f0f0f0' } } } }
+            });
+
+            // Status donut
+            const statusCount = {};
+            orders.forEach(o => { statusCount[o.status] = (statusCount[o.status] || 0) + 1; });
+
+            if (statusChartInstance) statusChartInstance.destroy();
+            statusChartInstance = new Chart(document.getElementById('statusChart'), {
+                type: 'doughnut',
+                data: {
+                    labels: Object.keys(statusCount),
+                    datasets: [{ data: Object.values(statusCount), backgroundColor: ['#ffc107', '#0d6efd', '#6f42c1', '#fd7e14', '#198754'] }]
+                },
+                options: { plugins: { legend: { position: 'bottom' } }, cutout: '70%' }
+            });
+        }
+
+        async function addRestaurant() {
+            const name = document.getElementById('rest-name').value.trim();
+            const category = document.getElementById('rest-category').value.trim();
+            const emoji = document.getElementById('rest-emoji').value.trim();
+            const address = document.getElementById('rest-address').value.trim();
+            if (!name || !category || !emoji || !address) { alert('❌ Fill all fields!'); return; }
+            await fetch('/api/restaurants/add', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, category, emoji, address }) });
+            ['rest-name','rest-category','rest-emoji','rest-address'].forEach(id => document.getElementById(id).value = '');
+            alert('✅ Restaurant added!');
+            loadData();
+        }
+
+        async function deleteRestaurant(id) {
+            if (!confirm('Delete?')) return;
+            await fetch('/api/restaurants/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) });
+            loadData();
+        }
+
+        async function addMenuItem() {
+            const restaurant_id = document.getElementById('menu-restaurant').value;
+            const category = document.getElementById('menu-category').value.trim();
+            const name = document.getElementById('menu-name').value.trim();
+            const price = document.getElementById('menu-price').value;
+            const description = document.getElementById('menu-description').value.trim();
+            if (!restaurant_id || !category || !name || !price) { alert('❌ Fill all fields!'); return; }
+            await fetch('/api/menu/add', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ restaurant_id, category, name, price: parseInt(price), description }) });
+            ['menu-category','menu-name','menu-price','menu-description'].forEach(id => document.getElementById(id).value = '');
+            alert('✅ Item added!');
+            loadData();
+        }
+
+        async function deleteMenuItem(id) {
+            if (!confirm('Delete?')) return;
+            await fetch('/api/menu/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) });
+            loadData();
+        }
+
+        async function updateOrderStatus(id, status) {
+            await fetch('/api/orders/status', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, status }) });
+            loadData();
+        }
+
+        async function updateAppStatus(id, status) {
+            await fetch('/api/application/status', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id, status }) });
+            loadData();
+        }
+
+        loadData();
+    </script>
+</body>
+</html>
