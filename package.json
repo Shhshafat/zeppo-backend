@@ -1,9 +1,10 @@
 {
   "name": "kupwara-delivery",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "ZEPPO Food Delivery App",
+  "main": "server.js",
   "scripts": {
+    "start": "node server.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
