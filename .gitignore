@@ -1,2 +1,5 @@
-.aider.chat.history.md 
-.aider.input.history 
+node_modules/
+zeppo.db
+uploads/
+.aider.chat.history.md
+.aider.input.history
