@@ -5,6 +5,7 @@ const bcrypt = require('bcryptjs');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const cors = require('cors');
 
 const app = express();
 const db = new Database('zeppo.db');
@@ -27,6 +28,7 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage, limits: { fileSize: 5 * 1024 * 1024 } });
 
+app.use(cors());
 app.use(express.json());
 app.use(express.static('.'));
 app.use('/uploads', express.static('uploads'));
