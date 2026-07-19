@@ -1,3 +1,4 @@
+require('dotenv').config();
 const express = require('express');
 const Database = require('better-sqlite3');
 const jwt = require('jsonwebtoken');
@@ -6,25 +7,35 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const cors = require('cors');
+const crypto = require('crypto');
+const nodemailer = require('nodemailer');
+const { v2: cloudinary } = require('cloudinary');
+const { CloudinaryStorage } = require('multer-storage-cloudinary');
+
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
+
+const transporter = nodemailer.createTransport({
+  service: 'gmail',
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS,
+  },
+});
 
 const app = express();
 const db = new Database('zeppo.db');
 const SECRET = 'zeppo_secret_2024';
 
-// Upload folders
-if (!fs.existsSync('uploads')) fs.mkdirSync('uploads');
-if (!fs.existsSync('uploads/restaurants')) fs.mkdirSync('uploads/restaurants');
-if (!fs.existsSync('uploads/food')) fs.mkdirSync('uploads/food');
-
-// Multer setup
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    const folder = req.path.includes('restaurant') ? 'uploads/restaurants' : 'uploads/food';
-    cb(null, folder);
-  },
-  filename: (req, file, cb) => {
-    cb(null, Date.now() + path.extname(file.originalname));
-  }
+const storage = new CloudinaryStorage({
+  cloudinary: cloudinary,
+  params: (req, file) => ({
+    folder: req.path.includes('restaurant') ? 'zeppo/restaurants' : 'zeppo/food',
+    allowed_formats: ['jpg', 'jpeg', 'png', 'webp'],
+  }),
 });
 const upload = multer({ storage, limits: { fileSize: 5 * 1024 * 1024 } });
 
@@ -47,12 +58,19 @@ db.exec(`
     address TEXT, description TEXT,
     image TEXT, rating TEXT DEFAULT '4.5',
     is_open INTEGER DEFAULT 1, active INTEGER DEFAULT 1,
+    commission_percent INTEGER DEFAULT 15,
+    phone TEXT, min_order INTEGER DEFAULT 0,
+    delivery_charge INTEGER DEFAULT 0,
+    opening_time TEXT DEFAULT '09:00',
+    closing_time TEXT DEFAULT '23:00',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
   CREATE TABLE IF NOT EXISTS menu_items (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     restaurant_id INTEGER, category TEXT,
-    name TEXT, price INTEGER, description TEXT,
+    name TEXT, price INTEGER, original_price INTEGER,
+    portions TEXT,
+    description TEXT,
     image TEXT, is_available INTEGER DEFAULT 1
   );
   CREATE TABLE IF NOT EXISTS orders (
@@ -81,6 +99,8 @@ db.exec(`
     salary_per_delivery INTEGER DEFAULT 50,
     total_deliveries INTEGER DEFAULT 0,
     total_earned INTEGER DEFAULT 0,
+    advance_taken INTEGER DEFAULT 0,
+    is_online INTEGER DEFAULT 1,
     is_active INTEGER DEFAULT 1,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
@@ -110,6 +130,13 @@ db.exec(`
     is_active INTEGER DEFAULT 1,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
+  CREATE TABLE IF NOT EXISTS password_resets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER, token TEXT UNIQUE,
+    expires_at DATETIME,
+    used INTEGER DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
 `);
 
 // Admin account
@@ -137,24 +164,71 @@ app.post('/api/register', (req, res) => {
 });
 
 app.post('/api/login', (req, res) => {
-  const { email, password } = req.body;
-  const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
-  if (!user) return res.json({ success: false, message: 'Email not found!' });
+  const { emailOrPhone, password } = req.body;
+  const user = db.prepare('SELECT * FROM users WHERE email = ? OR phone = ?').get(emailOrPhone, emailOrPhone);
+  if (!user) return res.json({ success: false, message: 'Account not found!' });
   const valid = bcrypt.compareSync(password, user.password);
   if (!valid) return res.json({ success: false, message: 'Wrong password!' });
   const token = jwt.sign({ id: user.id, name: user.name, role: user.role }, SECRET, { expiresIn: '7d' });
   res.json({ success: true, token, name: user.name, role: user.role });
 });
 
+app.post('/api/forgot-password', async (req, res) => {
+  const { email } = req.body;
+  const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
+  if (!user) return res.json({ success: true });
+
+  const token = crypto.randomBytes(32).toString('hex');
+  const expiresAt = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+  db.prepare('INSERT INTO password_resets (user_id, token, expires_at) VALUES (?, ?, ?)').run(user.id, token, expiresAt);
+
+  const resetLink = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/reset-password/${token}`;
+
+  try {
+    await transporter.sendMail({
+      from: `"ZEPPO" <${process.env.EMAIL_USER}>`,
+      to: email,
+      subject: 'Reset your ZEPPO password',
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; padding: 30px; background: #1a0a0f; color: white; border-radius: 16px;">
+          <h1 style="color: #ff6b00; letter-spacing: 2px;">ZEPPO</h1>
+          <p>Ghar tak, jhatpat!</p>
+          <hr style="border-color: rgba(255,255,255,0.1);" />
+          <p>Hi ${user.name},</p>
+          <p>You requested a password reset. Click below to set a new password (valid for 30 minutes):</p>
+          <a href="${resetLink}" style="display:inline-block; background:#ff6b00; color:white; padding:14px 28px; border-radius:12px; text-decoration:none; font-weight:bold; margin: 15px 0;">Reset Password</a>
+          <p style="color: rgba(255,255,255,0.5); font-size: 13px;">If you didn't request this, you can ignore this email.</p>
+        </div>
+      `,
+    });
+    res.json({ success: true });
+  } catch (e) {
+    console.error('EMAIL ERROR:', e.message);
+    res.json({ success: false, message: 'Email bhejne mein error aaya!' });
+  }
+});
+
+app.post('/api/reset-password', (req, res) => {
+  const { token, newPassword } = req.body;
+  const reset = db.prepare('SELECT * FROM password_resets WHERE token = ? AND used = 0').get(token);
+  if (!reset) return res.json({ success: false, message: 'Invalid or expired link!' });
+  if (new Date(reset.expires_at) < new Date()) return res.json({ success: false, message: 'Link expired! Request a new one.' });
+
+  const hashedPassword = bcrypt.hashSync(newPassword, 10);
+  db.prepare('UPDATE users SET password = ? WHERE id = ?').run(hashedPassword, reset.user_id);
+  db.prepare('UPDATE password_resets SET used = 1 WHERE id = ?').run(reset.id);
+  res.json({ success: true });
+});
+
 // ===== IMAGE UPLOAD =====
 app.post('/api/upload/restaurant', upload.single('image'), (req, res) => {
   if (!req.file) return res.json({ success: false });
-  res.json({ success: true, url: `/uploads/restaurants/${req.file.filename}` });
+  res.json({ success: true, url: req.file.path });
 });
 
 app.post('/api/upload/food', upload.single('image'), (req, res) => {
   if (!req.file) return res.json({ success: false });
-  res.json({ success: true, url: `/uploads/food/${req.file.filename}` });
+  res.json({ success: true, url: req.file.path });
 });
 
 // ===== RESTAURANTS =====
@@ -164,15 +238,23 @@ app.get('/api/restaurants', (req, res) => {
 });
 
 app.post('/api/restaurants/add', (req, res) => {
-  const { name, category, emoji, address, description, image } = req.body;
-  db.prepare('INSERT INTO restaurants (name, category, emoji, address, description, image) VALUES (?, ?, ?, ?, ?, ?)').run(name, category, emoji || '🍽️', address, description || '', image || '');
+  const { name, category, emoji, address, description, image, commission_percent, phone, min_order, delivery_charge, opening_time, closing_time } = req.body;
+  db.prepare('INSERT INTO restaurants (name, category, emoji, address, description, image, commission_percent, phone, min_order, delivery_charge, opening_time, closing_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
+    name, category, emoji || '🍽️', address, description || '', image || '',
+    commission_percent || 15, phone || '', min_order || 0, delivery_charge || 0,
+    opening_time || '09:00', closing_time || '23:00'
+  );
   db.prepare('INSERT INTO notifications (title, message, type) VALUES (?, ?, ?)').run('New Restaurant!', `${name} added`, 'restaurant');
   res.json({ success: true });
 });
 
 app.post('/api/restaurants/update', (req, res) => {
-  const { id, name, category, emoji, address, description, image, is_open } = req.body;
-  db.prepare('UPDATE restaurants SET name=?, category=?, emoji=?, address=?, description=?, image=?, is_open=? WHERE id=?').run(name, category, emoji, address, description, image, is_open, id);
+  const { id, name, category, emoji, address, description, image, is_open, commission_percent, phone, min_order, delivery_charge, opening_time, closing_time } = req.body;
+  db.prepare('UPDATE restaurants SET name=?, category=?, emoji=?, address=?, description=?, image=?, is_open=?, commission_percent=?, phone=?, min_order=?, delivery_charge=?, opening_time=?, closing_time=? WHERE id=?').run(
+    name, category, emoji, address, description, image, is_open,
+    commission_percent || 15, phone || '', min_order || 0, delivery_charge || 0,
+    opening_time || '09:00', closing_time || '23:00', id
+  );
   res.json({ success: true });
 });
 
@@ -194,14 +276,25 @@ app.get('/api/menu/:restaurant_id', (req, res) => {
 });
 
 app.post('/api/menu/add', (req, res) => {
-  const { restaurant_id, category, name, price, description, image } = req.body;
-  db.prepare('INSERT INTO menu_items (restaurant_id, category, name, price, description, image) VALUES (?, ?, ?, ?, ?, ?)').run(restaurant_id, category, name, price, description || '', image || '');
+  const { restaurant_id, category, name, price, original_price, portions, description, image } = req.body;
+  db.prepare('INSERT INTO menu_items (restaurant_id, category, name, price, original_price, portions, description, image) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
+    restaurant_id, category, name, price, original_price || null,
+    portions ? JSON.stringify(portions) : null, description || '', image || ''
+  );
   res.json({ success: true });
 });
 
 app.post('/api/menu/update', (req, res) => {
-  const { id, name, price, description, image, is_available } = req.body;
-  db.prepare('UPDATE menu_items SET name=?, price=?, description=?, image=?, is_available=? WHERE id=?').run(name, price, description, image, is_available, id);
+  const { id, name, price, original_price, portions, description, image, is_available } = req.body;
+  db.prepare('UPDATE menu_items SET name=?, price=?, original_price=?, portions=?, description=?, image=?, is_available=? WHERE id=?').run(
+    name, price, original_price || null, portions ? JSON.stringify(portions) : null, description, image, is_available, id
+  );
+  res.json({ success: true });
+});
+
+app.post('/api/menu/toggle', (req, res) => {
+  const { id, is_available } = req.body;
+  db.prepare('UPDATE menu_items SET is_available = ? WHERE id = ?').run(is_available, id);
   res.json({ success: true });
 });
 
@@ -252,12 +345,24 @@ app.get('/api/my-orders', (req, res) => {
 });
 
 app.get('/api/delivery-orders', (req, res) => {
-  res.json(db.prepare("SELECT * FROM orders WHERE status IN ('confirmed','preparing','on_the_way','delivered') ORDER BY created_at DESC").all());
+  const auth = req.headers.authorization;
+  if (!auth) return res.json([]);
+  try {
+    const decoded = jwt.verify(auth.split(' ')[1], SECRET);
+    const dboy = db.prepare('SELECT * FROM delivery_boys WHERE user_id = ?').get(decoded.id);
+    if (!dboy) return res.json([]);
+    res.json(db.prepare("SELECT * FROM orders WHERE delivery_boy_id = ? AND status IN ('confirmed','preparing','on_the_way','delivered') ORDER BY created_at DESC").all(dboy.id));
+  } catch(e) { res.json([]); }
 });
 
 app.post('/api/orders/assign', (req, res) => {
   const { order_id, delivery_boy_id } = req.body;
   db.prepare('UPDATE orders SET delivery_boy_id = ? WHERE id = ?').run(delivery_boy_id, order_id);
+  res.json({ success: true });
+});
+
+app.post('/api/orders/cancel', (req, res) => {
+  db.prepare("UPDATE orders SET status = 'cancelled' WHERE id = ?").run(req.body.id);
   res.json({ success: true });
 });
 
@@ -267,8 +372,16 @@ app.get('/api/delivery-boys', (req, res) => {
 });
 
 app.post('/api/delivery-boys/add', (req, res) => {
-  const { name, phone, salary_per_delivery } = req.body;
-  db.prepare('INSERT INTO delivery_boys (name, phone, salary_per_delivery) VALUES (?, ?, ?)').run(name, phone, salary_per_delivery || 50);
+  const { name, phone, email, password, salary_per_delivery } = req.body;
+  let user_id = null;
+  if (email && password) {
+    const exists = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
+    if (exists) return res.json({ success: false, message: 'Email already used!' });
+    const hashedPassword = bcrypt.hashSync(password, 10);
+    const result = db.prepare("INSERT INTO users (name, email, phone, password, role) VALUES (?, ?, ?, ?, 'delivery')").run(name, email, phone, hashedPassword);
+    user_id = result.lastInsertRowid;
+  }
+  db.prepare('INSERT INTO delivery_boys (user_id, name, phone, salary_per_delivery) VALUES (?, ?, ?, ?)').run(user_id, name, phone, salary_per_delivery || 50);
   res.json({ success: true });
 });
 
@@ -278,8 +391,24 @@ app.post('/api/delivery-boys/salary', (req, res) => {
   res.json({ success: true });
 });
 
+app.post('/api/delivery-boys/advance', (req, res) => {
+  const { id, amount } = req.body;
+  db.prepare('UPDATE delivery_boys SET advance_taken = advance_taken + ? WHERE id = ?').run(amount, id);
+  res.json({ success: true });
+});
+
 app.get('/api/delivery-boys/stats', (req, res) => {
   res.json(db.prepare('SELECT * FROM delivery_boys').all());
+});
+
+app.get('/api/delivery-boys/me', (req, res) => {
+  const auth = req.headers.authorization;
+  if (!auth) return res.json(null);
+  try {
+    const decoded = jwt.verify(auth.split(' ')[1], SECRET);
+    const dboy = db.prepare('SELECT * FROM delivery_boys WHERE user_id = ?').get(decoded.id);
+    res.json(dboy || null);
+  } catch(e) { res.json(null); }
 });
 
 // ===== RATINGS =====
@@ -389,7 +518,20 @@ app.get('/api/analytics', (req, res) => {
   const pendingOrders = db.prepare("SELECT COUNT(*) as count FROM orders WHERE status = 'pending'").get().count;
   const todayOrders = db.prepare("SELECT COUNT(*) as count FROM orders WHERE date(created_at) = date('now')").get().count;
   const topRestaurants = db.prepare('SELECT restaurant_name, COUNT(*) as orders, SUM(total) as revenue FROM orders GROUP BY restaurant_name ORDER BY orders DESC LIMIT 5').all();
-  res.json({ totalOrders, totalRevenue, totalUsers, totalRestaurants, pendingOrders, todayOrders, topRestaurants });
+
+  const deliveredOrders = db.prepare("SELECT o.total, r.commission_percent FROM orders o LEFT JOIN restaurants r ON o.restaurant_id = r.id WHERE o.status = 'delivered'").all();
+  const totalCommission = deliveredOrders.reduce((sum, o) => sum + Math.floor((o.total || 0) * (o.commission_percent || 15) / 100), 0);
+
+  const dboys = db.prepare('SELECT total_earned, advance_taken FROM delivery_boys').all();
+  const totalPendingPayout = dboys.reduce((sum, d) => sum + (d.total_earned - d.advance_taken), 0);
+
+  res.json({ totalOrders, totalRevenue, totalUsers, totalRestaurants, pendingOrders, todayOrders, topRestaurants, totalCommission, totalPendingPayout });
+});
+
+// Error handler
+app.use((err, req, res, next) => {
+  console.error('SERVER ERROR:', err.message);
+  res.status(500).json({ success: false, message: err.message });
 });
 
 app.listen(3001, () => {
