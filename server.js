@@ -20,10 +20,7 @@ cloudinary.config({
 
 const transporter = nodemailer.createTransport({
   service: 'gmail',
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS,
-  },
+  auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
 });
 
 const app = express();
@@ -33,18 +30,18 @@ const SECRET = 'zeppo_secret_2024';
 const storage = new CloudinaryStorage({
   cloudinary: cloudinary,
   params: (req, file) => ({
-    folder: req.path.includes('restaurant') ? 'zeppo/restaurants' : 'zeppo/food',
-    allowed_formats: ['jpg', 'jpeg', 'png', 'webp'],
+    folder: req.path.includes('restaurant') ? 'zeppo/restaurants' : req.path.includes('banner') ? 'zeppo/banners' : 'zeppo/food',
+    resource_type: req.path.includes('banner') ? 'auto' : 'image',
+    allowed_formats: req.path.includes('banner') ? ['jpg', 'jpeg', 'png', 'webp', 'mp4', 'mov'] : ['jpg', 'jpeg', 'png', 'webp'],
   }),
 });
-const upload = multer({ storage, limits: { fileSize: 5 * 1024 * 1024 } });
+const upload = multer({ storage, limits: { fileSize: 20 * 1024 * 1024 } });
 
 app.use(cors());
 app.use(express.json());
 app.use(express.static('.'));
 app.use('/uploads', express.static('uploads'));
 
-// Database tables
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -69,7 +66,7 @@ db.exec(`
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     restaurant_id INTEGER, category TEXT,
     name TEXT, price INTEGER, original_price INTEGER,
-    portions TEXT,
+    portions TEXT, is_veg INTEGER DEFAULT 1,
     description TEXT,
     image TEXT, is_available INTEGER DEFAULT 1
   );
@@ -89,7 +86,7 @@ db.exec(`
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     full_name TEXT, father_name TEXT, phone TEXT,
     aadhar TEXT, dob TEXT, address TEXT,
-    has_bike TEXT, bike_number TEXT, education TEXT,
+    has_bike TEXT, bike_number TEXT,
     status TEXT DEFAULT 'pending',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
@@ -100,9 +97,39 @@ db.exec(`
     total_deliveries INTEGER DEFAULT 0,
     total_earned INTEGER DEFAULT 0,
     advance_taken INTEGER DEFAULT 0,
-    is_online INTEGER DEFAULT 1,
+    paid_out INTEGER DEFAULT 0,
+    is_online INTEGER DEFAULT 0,
     is_active INTEGER DEFAULT 1,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE TABLE IF NOT EXISTS delivery_advances (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    delivery_boy_id INTEGER,
+    amount INTEGER,
+    note TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE TABLE IF NOT EXISTS delivery_shifts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    delivery_boy_id INTEGER,
+    check_in DATETIME,
+    check_out DATETIME
+  );
+  CREATE TABLE IF NOT EXISTS settlements (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    type TEXT, party_id INTEGER, party_name TEXT,
+    amount INTEGER, note TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE TABLE IF NOT EXISTS support_tickets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER, name TEXT, phone TEXT, email TEXT,
+    subject TEXT, message TEXT,
+    priority TEXT DEFAULT 'normal',
+    status TEXT DEFAULT 'open',
+    admin_reply TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
   CREATE TABLE IF NOT EXISTS ratings (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -120,6 +147,7 @@ db.exec(`
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     title TEXT, subtitle TEXT, image TEXT,
     button_text TEXT, is_active INTEGER DEFAULT 1,
+    link TEXT, is_video INTEGER DEFAULT 0,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
   CREATE TABLE IF NOT EXISTS coupons (
@@ -139,14 +167,11 @@ db.exec(`
   );
 `);
 
-// Admin account
 const adminExists = db.prepare("SELECT * FROM users WHERE role='admin'").get();
 if (!adminExists) {
   const hashedPassword = bcrypt.hashSync('zeppo123', 10);
   db.prepare("INSERT INTO users (name, email, phone, password, role) VALUES (?, ?, ?, ?, ?)").run('Shafat', 'admin@zeppo.com', '9999999999', hashedPassword, 'admin');
 }
-
-// Default coupon
 const couponExists = db.prepare("SELECT * FROM coupons WHERE code='ZEPPO50'").get();
 if (!couponExists) {
   db.prepare("INSERT INTO coupons (code, discount, type, min_order) VALUES (?, ?, ?, ?)").run('ZEPPO50', 50, 'flat', 100);
@@ -162,7 +187,6 @@ app.post('/api/register', (req, res) => {
   db.prepare('INSERT INTO users (name, email, phone, password) VALUES (?, ?, ?, ?)').run(name, email, phone, hashedPassword);
   res.json({ success: true });
 });
-
 app.post('/api/login', (req, res) => {
   const { emailOrPhone, password } = req.body;
   const user = db.prepare('SELECT * FROM users WHERE email = ? OR phone = ?').get(emailOrPhone, emailOrPhone);
@@ -172,48 +196,31 @@ app.post('/api/login', (req, res) => {
   const token = jwt.sign({ id: user.id, name: user.name, role: user.role }, SECRET, { expiresIn: '7d' });
   res.json({ success: true, token, name: user.name, role: user.role });
 });
-
 app.post('/api/forgot-password', async (req, res) => {
   const { email } = req.body;
   const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
   if (!user) return res.json({ success: true });
-
   const token = crypto.randomBytes(32).toString('hex');
   const expiresAt = new Date(Date.now() + 30 * 60 * 1000).toISOString();
   db.prepare('INSERT INTO password_resets (user_id, token, expires_at) VALUES (?, ?, ?)').run(user.id, token, expiresAt);
-
   const resetLink = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/reset-password/${token}`;
-
   try {
     await transporter.sendMail({
-      from: `"ZEPPO" <${process.env.EMAIL_USER}>`,
-      to: email,
-      subject: 'Reset your ZEPPO password',
-      html: `
-        <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; padding: 30px; background: #1a0a0f; color: white; border-radius: 16px;">
-          <h1 style="color: #ff6b00; letter-spacing: 2px;">ZEPPO</h1>
-          <p>Ghar tak, jhatpat!</p>
-          <hr style="border-color: rgba(255,255,255,0.1);" />
-          <p>Hi ${user.name},</p>
-          <p>You requested a password reset. Click below to set a new password (valid for 30 minutes):</p>
-          <a href="${resetLink}" style="display:inline-block; background:#ff6b00; color:white; padding:14px 28px; border-radius:12px; text-decoration:none; font-weight:bold; margin: 15px 0;">Reset Password</a>
-          <p style="color: rgba(255,255,255,0.5); font-size: 13px;">If you didn't request this, you can ignore this email.</p>
-        </div>
-      `,
+      from: `"ZEPPO" <${process.env.EMAIL_USER}>`, to: email, subject: 'Reset your ZEPPO password',
+      html: `<div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; padding: 30px; background: #1a0a0f; color: white; border-radius: 16px;">
+        <h1 style="color: #ff6b00; letter-spacing: 2px;">ZEPPO</h1><p>Ghar tak, jhatpat!</p><hr style="border-color: rgba(255,255,255,0.1);" />
+        <p>Hi ${user.name},</p><p>You requested a password reset. Click below to set a new password (valid for 30 minutes):</p>
+        <a href="${resetLink}" style="display:inline-block; background:#ff6b00; color:white; padding:14px 28px; border-radius:12px; text-decoration:none; font-weight:bold; margin: 15px 0;">Reset Password</a>
+        <p style="color: rgba(255,255,255,0.5); font-size: 13px;">If you didn't request this, you can ignore this email.</p></div>`,
     });
     res.json({ success: true });
-  } catch (e) {
-    console.error('EMAIL ERROR:', e.message);
-    res.json({ success: false, message: 'Email bhejne mein error aaya!' });
-  }
+  } catch (e) { console.error('EMAIL ERROR:', e.message); res.json({ success: false, message: 'Email bhejne mein error aaya!' }); }
 });
-
 app.post('/api/reset-password', (req, res) => {
   const { token, newPassword } = req.body;
   const reset = db.prepare('SELECT * FROM password_resets WHERE token = ? AND used = 0').get(token);
   if (!reset) return res.json({ success: false, message: 'Invalid or expired link!' });
   if (new Date(reset.expires_at) < new Date()) return res.json({ success: false, message: 'Link expired! Request a new one.' });
-
   const hashedPassword = bcrypt.hashSync(newPassword, 10);
   db.prepare('UPDATE users SET password = ? WHERE id = ?').run(hashedPassword, reset.user_id);
   db.prepare('UPDATE password_resets SET used = 1 WHERE id = ?').run(reset.id);
@@ -221,129 +228,79 @@ app.post('/api/reset-password', (req, res) => {
 });
 
 // ===== IMAGE UPLOAD =====
-app.post('/api/upload/restaurant', upload.single('image'), (req, res) => {
+app.post('/api/upload/restaurant', upload.single('image'), (req, res) => { if (!req.file) return res.json({ success: false }); res.json({ success: true, url: req.file.path }); });
+app.post('/api/upload/food', upload.single('image'), (req, res) => { if (!req.file) return res.json({ success: false }); res.json({ success: true, url: req.file.path }); });
+app.post('/api/upload/banner', upload.single('image'), (req, res) => {
   if (!req.file) return res.json({ success: false });
-  res.json({ success: true, url: req.file.path });
-});
-
-app.post('/api/upload/food', upload.single('image'), (req, res) => {
-  if (!req.file) return res.json({ success: false });
-  res.json({ success: true, url: req.file.path });
+  const isVideo = req.file.mimetype && req.file.mimetype.startsWith('video');
+  res.json({ success: true, url: req.file.path, is_video: isVideo ? 1 : 0 });
 });
 
 // ===== RESTAURANTS =====
-app.get('/api/restaurants', (req, res) => {
-  const restaurants = db.prepare('SELECT * FROM restaurants WHERE active = 1').all();
-  res.json(restaurants);
-});
-
+app.get('/api/restaurants', (req, res) => { res.json(db.prepare('SELECT * FROM restaurants WHERE active = 1').all()); });
 app.post('/api/restaurants/add', (req, res) => {
   const { name, category, emoji, address, description, image, commission_percent, phone, min_order, delivery_charge, opening_time, closing_time } = req.body;
   db.prepare('INSERT INTO restaurants (name, category, emoji, address, description, image, commission_percent, phone, min_order, delivery_charge, opening_time, closing_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
-    name, category, emoji || '🍽️', address, description || '', image || '',
-    commission_percent || 15, phone || '', min_order || 0, delivery_charge || 0,
-    opening_time || '09:00', closing_time || '23:00'
+    name, category, emoji || '🍽️', address, description || '', image || '', commission_percent || 15, phone || '', min_order || 0, delivery_charge || 0, opening_time || '09:00', closing_time || '23:00'
   );
   db.prepare('INSERT INTO notifications (title, message, type) VALUES (?, ?, ?)').run('New Restaurant!', `${name} added`, 'restaurant');
   res.json({ success: true });
 });
-
 app.post('/api/restaurants/update', (req, res) => {
   const { id, name, category, emoji, address, description, image, is_open, commission_percent, phone, min_order, delivery_charge, opening_time, closing_time } = req.body;
   db.prepare('UPDATE restaurants SET name=?, category=?, emoji=?, address=?, description=?, image=?, is_open=?, commission_percent=?, phone=?, min_order=?, delivery_charge=?, opening_time=?, closing_time=? WHERE id=?').run(
-    name, category, emoji, address, description, image, is_open,
-    commission_percent || 15, phone || '', min_order || 0, delivery_charge || 0,
-    opening_time || '09:00', closing_time || '23:00', id
+    name, category, emoji, address, description, image, is_open, commission_percent || 15, phone || '', min_order || 0, delivery_charge || 0, opening_time || '09:00', closing_time || '23:00', id
   );
   res.json({ success: true });
 });
-
-app.post('/api/restaurants/delete', (req, res) => {
-  db.prepare('UPDATE restaurants SET active = 0 WHERE id = ?').run(req.body.id);
-  res.json({ success: true });
-});
-
-app.post('/api/restaurants/toggle', (req, res) => {
-  const { id, is_open } = req.body;
-  db.prepare('UPDATE restaurants SET is_open = ? WHERE id = ?').run(is_open, id);
-  res.json({ success: true });
-});
+app.post('/api/restaurants/delete', (req, res) => { db.prepare('UPDATE restaurants SET active = 0 WHERE id = ?').run(req.body.id); res.json({ success: true }); });
+app.post('/api/restaurants/toggle', (req, res) => { const { id, is_open } = req.body; db.prepare('UPDATE restaurants SET is_open = ? WHERE id = ?').run(is_open, id); res.json({ success: true }); });
 
 // ===== MENU =====
-app.get('/api/menu/:restaurant_id', (req, res) => {
-  const items = db.prepare('SELECT * FROM menu_items WHERE restaurant_id = ? ORDER BY category').all(req.params.restaurant_id);
-  res.json(items);
-});
-
+app.get('/api/menu/:restaurant_id', (req, res) => { res.json(db.prepare('SELECT * FROM menu_items WHERE restaurant_id = ? ORDER BY category').all(req.params.restaurant_id)); });
 app.post('/api/menu/add', (req, res) => {
-  const { restaurant_id, category, name, price, original_price, portions, description, image } = req.body;
-  db.prepare('INSERT INTO menu_items (restaurant_id, category, name, price, original_price, portions, description, image) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
+  const { restaurant_id, category, name, price, original_price, portions, description, image, is_veg } = req.body;
+  db.prepare('INSERT INTO menu_items (restaurant_id, category, name, price, original_price, portions, description, image, is_veg) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').run(
     restaurant_id, category, name, price, original_price || null,
-    portions ? JSON.stringify(portions) : null, description || '', image || ''
+    portions ? JSON.stringify(portions) : null, description || '', image || '', is_veg !== undefined ? is_veg : 1
   );
   res.json({ success: true });
 });
-
 app.post('/api/menu/update', (req, res) => {
-  const { id, name, price, original_price, portions, description, image, is_available } = req.body;
-  db.prepare('UPDATE menu_items SET name=?, price=?, original_price=?, portions=?, description=?, image=?, is_available=? WHERE id=?').run(
-    name, price, original_price || null, portions ? JSON.stringify(portions) : null, description, image, is_available, id
+  const { id, name, price, original_price, portions, description, image, is_available, is_veg } = req.body;
+  db.prepare('UPDATE menu_items SET name=?, price=?, original_price=?, portions=?, description=?, image=?, is_available=?, is_veg=? WHERE id=?').run(
+    name, price, original_price || null, portions ? JSON.stringify(portions) : null, description, image, is_available, is_veg !== undefined ? is_veg : 1, id
   );
   res.json({ success: true });
 });
-
-app.post('/api/menu/toggle', (req, res) => {
-  const { id, is_available } = req.body;
-  db.prepare('UPDATE menu_items SET is_available = ? WHERE id = ?').run(is_available, id);
-  res.json({ success: true });
-});
-
-app.post('/api/menu/delete', (req, res) => {
-  db.prepare('DELETE FROM menu_items WHERE id = ?').run(req.body.id);
-  res.json({ success: true });
-});
+app.post('/api/menu/toggle', (req, res) => { const { id, is_available } = req.body; db.prepare('UPDATE menu_items SET is_available = ? WHERE id = ?').run(is_available, id); res.json({ success: true }); });
+app.post('/api/menu/delete', (req, res) => { db.prepare('DELETE FROM menu_items WHERE id = ?').run(req.body.id); res.json({ success: true }); });
 
 // ===== ORDERS =====
 app.post('/api/order', (req, res) => {
   const { customer_name, customer_phone, customer_address, restaurant_id, restaurant_name, items, total, payment_method } = req.body;
   let user_id = null;
   const auth = req.headers.authorization;
-  if (auth) {
-    try {
-      const decoded = jwt.verify(auth.split(' ')[1], SECRET);
-      user_id = decoded.id;
-    } catch(e) {}
-  }
+  if (auth) { try { user_id = jwt.verify(auth.split(' ')[1], SECRET).id; } catch(e) {} }
   db.prepare('INSERT INTO orders (user_id, customer_name, customer_phone, customer_address, restaurant_id, restaurant_name, items, total, payment_method) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').run(user_id, customer_name, customer_phone, customer_address, restaurant_id, restaurant_name, JSON.stringify(items), total, payment_method || 'cash');
   db.prepare('INSERT INTO notifications (title, message, type) VALUES (?, ?, ?)').run('New Order! 🛵', `${customer_name} ordered from ${restaurant_name} — ₹${total}`, 'order');
   res.json({ success: true });
 });
-
-app.get('/api/orders', (req, res) => {
-  res.json(db.prepare('SELECT * FROM orders ORDER BY created_at DESC').all());
-});
-
+app.get('/api/orders', (req, res) => { res.json(db.prepare('SELECT * FROM orders ORDER BY created_at DESC').all()); });
 app.post('/api/orders/status', (req, res) => {
   const { id, status } = req.body;
   db.prepare('UPDATE orders SET status = ? WHERE id = ?').run(status, id);
   if (status === 'delivered') {
     const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(id);
-    if (order?.delivery_boy_id) {
-      db.prepare('UPDATE delivery_boys SET total_deliveries = total_deliveries + 1, total_earned = total_earned + salary_per_delivery WHERE id = ?').run(order.delivery_boy_id);
-    }
+    if (order?.delivery_boy_id) db.prepare('UPDATE delivery_boys SET total_deliveries = total_deliveries + 1, total_earned = total_earned + salary_per_delivery WHERE id = ?').run(order.delivery_boy_id);
   }
   res.json({ success: true });
 });
-
 app.get('/api/my-orders', (req, res) => {
   const auth = req.headers.authorization;
   if (!auth) return res.json([]);
-  try {
-    const decoded = jwt.verify(auth.split(' ')[1], SECRET);
-    res.json(db.prepare('SELECT * FROM orders WHERE user_id = ? ORDER BY created_at DESC').all(decoded.id));
-  } catch(e) { res.json([]); }
+  try { const decoded = jwt.verify(auth.split(' ')[1], SECRET); res.json(db.prepare('SELECT * FROM orders WHERE user_id = ? ORDER BY created_at DESC').all(decoded.id)); } catch(e) { res.json([]); }
 });
-
 app.get('/api/delivery-orders', (req, res) => {
   const auth = req.headers.authorization;
   if (!auth) return res.json([]);
@@ -354,23 +311,11 @@ app.get('/api/delivery-orders', (req, res) => {
     res.json(db.prepare("SELECT * FROM orders WHERE delivery_boy_id = ? AND status IN ('confirmed','preparing','on_the_way','delivered') ORDER BY created_at DESC").all(dboy.id));
   } catch(e) { res.json([]); }
 });
-
-app.post('/api/orders/assign', (req, res) => {
-  const { order_id, delivery_boy_id } = req.body;
-  db.prepare('UPDATE orders SET delivery_boy_id = ? WHERE id = ?').run(delivery_boy_id, order_id);
-  res.json({ success: true });
-});
-
-app.post('/api/orders/cancel', (req, res) => {
-  db.prepare("UPDATE orders SET status = 'cancelled' WHERE id = ?").run(req.body.id);
-  res.json({ success: true });
-});
+app.post('/api/orders/assign', (req, res) => { const { order_id, delivery_boy_id } = req.body; db.prepare('UPDATE orders SET delivery_boy_id = ? WHERE id = ?').run(delivery_boy_id, order_id); res.json({ success: true }); });
+app.post('/api/orders/cancel', (req, res) => { db.prepare("UPDATE orders SET status = 'cancelled' WHERE id = ?").run(req.body.id); res.json({ success: true }); });
 
 // ===== DELIVERY BOYS =====
-app.get('/api/delivery-boys', (req, res) => {
-  res.json(db.prepare('SELECT * FROM delivery_boys WHERE is_active = 1').all());
-});
-
+app.get('/api/delivery-boys', (req, res) => { res.json(db.prepare('SELECT * FROM delivery_boys WHERE is_active = 1').all()); });
 app.post('/api/delivery-boys/add', (req, res) => {
   const { name, phone, email, password, salary_per_delivery } = req.body;
   let user_id = null;
@@ -384,41 +329,117 @@ app.post('/api/delivery-boys/add', (req, res) => {
   db.prepare('INSERT INTO delivery_boys (user_id, name, phone, salary_per_delivery) VALUES (?, ?, ?, ?)').run(user_id, name, phone, salary_per_delivery || 50);
   res.json({ success: true });
 });
-
-app.post('/api/delivery-boys/salary', (req, res) => {
-  const { id, salary_per_delivery } = req.body;
-  db.prepare('UPDATE delivery_boys SET salary_per_delivery = ? WHERE id = ?').run(salary_per_delivery, id);
-  res.json({ success: true });
-});
-
+app.post('/api/delivery-boys/salary', (req, res) => { const { id, salary_per_delivery } = req.body; db.prepare('UPDATE delivery_boys SET salary_per_delivery = ? WHERE id = ?').run(salary_per_delivery, id); res.json({ success: true }); });
 app.post('/api/delivery-boys/advance', (req, res) => {
-  const { id, amount } = req.body;
+  const { id, amount, note } = req.body;
   db.prepare('UPDATE delivery_boys SET advance_taken = advance_taken + ? WHERE id = ?').run(amount, id);
+  db.prepare('INSERT INTO delivery_advances (delivery_boy_id, amount, note) VALUES (?, ?, ?)').run(id, amount, note || '');
+  db.prepare('INSERT INTO notifications (title, message, type) VALUES (?, ?, ?)').run('Advance Given', `₹${amount} advance given${note ? ' — ' + note : ''}`, 'advance');
   res.json({ success: true });
 });
-
-app.get('/api/delivery-boys/stats', (req, res) => {
-  res.json(db.prepare('SELECT * FROM delivery_boys').all());
-});
-
+app.get('/api/delivery-boys/stats', (req, res) => { res.json(db.prepare('SELECT * FROM delivery_boys WHERE is_active = 1').all()); });
 app.get('/api/delivery-boys/me', (req, res) => {
   const auth = req.headers.authorization;
   if (!auth) return res.json(null);
+  try { const decoded = jwt.verify(auth.split(' ')[1], SECRET); res.json(db.prepare('SELECT * FROM delivery_boys WHERE user_id = ?').get(decoded.id) || null); } catch(e) { res.json(null); }
+});
+app.get('/api/delivery-boys/my-advances', (req, res) => {
+  const auth = req.headers.authorization;
+  if (!auth) return res.json([]);
   try {
     const decoded = jwt.verify(auth.split(' ')[1], SECRET);
     const dboy = db.prepare('SELECT * FROM delivery_boys WHERE user_id = ?').get(decoded.id);
-    res.json(dboy || null);
-  } catch(e) { res.json(null); }
+    if (!dboy) return res.json([]);
+    res.json(db.prepare('SELECT * FROM delivery_advances WHERE delivery_boy_id = ? ORDER BY created_at DESC').all(dboy.id));
+  } catch(e) { res.json([]); }
 });
+app.get('/api/delivery-boys/:id/advances', (req, res) => { res.json(db.prepare('SELECT * FROM delivery_advances WHERE delivery_boy_id = ? ORDER BY created_at DESC').all(req.params.id)); });
+app.post('/api/delivery-boys/remove', (req, res) => { db.prepare('UPDATE delivery_boys SET is_active = 0, is_online = 0 WHERE id = ?').run(req.body.id); res.json({ success: true }); });
+app.post('/api/delivery-boys/toggle-online', (req, res) => {
+  const auth = req.headers.authorization;
+  if (!auth) return res.json({ success: false });
+  try {
+    const decoded = jwt.verify(auth.split(' ')[1], SECRET);
+    const dboy = db.prepare('SELECT * FROM delivery_boys WHERE user_id = ?').get(decoded.id);
+    if (!dboy) return res.json({ success: false });
+    if (dboy.is_online) {
+      db.prepare('UPDATE delivery_boys SET is_online = 0 WHERE id = ?').run(dboy.id);
+      const openShift = db.prepare('SELECT * FROM delivery_shifts WHERE delivery_boy_id = ? AND check_out IS NULL ORDER BY id DESC LIMIT 1').get(dboy.id);
+      if (openShift) db.prepare('UPDATE delivery_shifts SET check_out = datetime("now") WHERE id = ?').run(openShift.id);
+      res.json({ success: true, is_online: 0 });
+    } else {
+      db.prepare('UPDATE delivery_boys SET is_online = 1 WHERE id = ?').run(dboy.id);
+      db.prepare('INSERT INTO delivery_shifts (delivery_boy_id, check_in) VALUES (?, datetime("now"))').run(dboy.id);
+      res.json({ success: true, is_online: 1 });
+    }
+  } catch (e) { res.json({ success: false }); }
+});
+app.get('/api/delivery-boys/my-shifts', (req, res) => {
+  const auth = req.headers.authorization;
+  if (!auth) return res.json([]);
+  try {
+    const decoded = jwt.verify(auth.split(' ')[1], SECRET);
+    const dboy = db.prepare('SELECT * FROM delivery_boys WHERE user_id = ?').get(decoded.id);
+    if (!dboy) return res.json([]);
+    res.json(db.prepare("SELECT * FROM delivery_shifts WHERE delivery_boy_id = ? AND date(check_in) = date('now') ORDER BY id DESC").all(dboy.id));
+  } catch (e) { res.json([]); }
+});
+app.get('/api/delivery-boys/all-shifts', (req, res) => {
+  res.json(db.prepare(`SELECT s.*, d.name as delivery_boy_name FROM delivery_shifts s LEFT JOIN delivery_boys d ON s.delivery_boy_id = d.id WHERE date(s.check_in) = date('now') ORDER BY s.id DESC`).all());
+});
+
+// ===== SETTLEMENTS =====
+app.get('/api/settlements/restaurants', (req, res) => {
+  const rests = db.prepare('SELECT * FROM restaurants WHERE active = 1').all();
+  const result = rests.map(r => {
+    const delivered = db.prepare("SELECT SUM(total) as sum, COUNT(*) as cnt FROM orders WHERE restaurant_id = ? AND status = 'delivered'").get(r.id);
+    const totalCommission = Math.floor((delivered.sum || 0) * (r.commission_percent || 15) / 100);
+    const settled = db.prepare("SELECT SUM(amount) as sum FROM settlements WHERE type = 'restaurant' AND party_id = ?").get(r.id).sum || 0;
+    return { id: r.id, name: r.name, emoji: r.emoji, orders: delivered.cnt || 0, revenue: delivered.sum || 0, commission_percent: r.commission_percent || 15, totalCommission, settled, pending: totalCommission - settled };
+  });
+  res.json(result);
+});
+app.post('/api/settlements/restaurant/pay', (req, res) => {
+  const { restaurant_id, amount, note } = req.body;
+  const r = db.prepare('SELECT * FROM restaurants WHERE id = ?').get(restaurant_id);
+  db.prepare('INSERT INTO settlements (type, party_id, party_name, amount, note) VALUES (?, ?, ?, ?, ?)').run('restaurant', restaurant_id, r?.name || '', amount, note || '');
+  res.json({ success: true });
+});
+app.get('/api/settlements/restaurant/:id/history', (req, res) => { res.json(db.prepare("SELECT * FROM settlements WHERE type = 'restaurant' AND party_id = ? ORDER BY created_at DESC").all(req.params.id)); });
+app.post('/api/delivery-boys/settle', (req, res) => {
+  const { id, amount, note } = req.body;
+  const d = db.prepare('SELECT * FROM delivery_boys WHERE id = ?').get(id);
+  db.prepare('UPDATE delivery_boys SET paid_out = paid_out + ? WHERE id = ?').run(amount, id);
+  db.prepare('INSERT INTO settlements (type, party_id, party_name, amount, note) VALUES (?, ?, ?, ?, ?)').run('delivery', id, d?.name || '', amount, note || 'Salary payout');
+  res.json({ success: true });
+});
+app.get('/api/settlements/delivery/:id/history', (req, res) => { res.json(db.prepare("SELECT * FROM settlements WHERE type = 'delivery' AND party_id = ? ORDER BY created_at DESC").all(req.params.id)); });
+
+// ===== SUPPORT TICKETS =====
+app.post('/api/tickets', (req, res) => {
+  const { name, phone, email, subject, message, priority } = req.body;
+  let user_id = null;
+  const auth = req.headers.authorization;
+  if (auth) { try { user_id = jwt.verify(auth.split(' ')[1], SECRET).id; } catch(e) {} }
+  db.prepare('INSERT INTO support_tickets (user_id, name, phone, email, subject, message, priority) VALUES (?, ?, ?, ?, ?, ?, ?)').run(user_id, name, phone, email, subject, message, priority || 'normal');
+  db.prepare('INSERT INTO notifications (title, message, type) VALUES (?, ?, ?)').run('New Support Ticket', `${name}: ${subject}`, 'ticket');
+  res.json({ success: true });
+});
+app.get('/api/tickets', (req, res) => { res.json(db.prepare('SELECT * FROM support_tickets ORDER BY created_at DESC').all()); });
+app.get('/api/tickets/my', (req, res) => {
+  const auth = req.headers.authorization;
+  if (!auth) return res.json([]);
+  try { const decoded = jwt.verify(auth.split(' ')[1], SECRET); res.json(db.prepare('SELECT * FROM support_tickets WHERE user_id = ? ORDER BY created_at DESC').all(decoded.id)); } catch(e) { res.json([]); }
+});
+app.post('/api/tickets/status', (req, res) => { const { id, status } = req.body; db.prepare('UPDATE support_tickets SET status = ?, updated_at = datetime("now") WHERE id = ?').run(status, id); res.json({ success: true }); });
+app.post('/api/tickets/reply', (req, res) => { const { id, reply } = req.body; db.prepare('UPDATE support_tickets SET admin_reply = ?, status = "in_progress", updated_at = datetime("now") WHERE id = ?').run(reply, id); res.json({ success: true }); });
 
 // ===== RATINGS =====
 app.post('/api/rating', (req, res) => {
   const { restaurant_id, order_id, rating, review } = req.body;
   let user_id = null;
   const auth = req.headers.authorization;
-  if (auth) {
-    try { user_id = jwt.verify(auth.split(' ')[1], SECRET).id; } catch(e) {}
-  }
+  if (auth) { try { user_id = jwt.verify(auth.split(' ')[1], SECRET).id; } catch(e) {} }
   const exists = db.prepare('SELECT * FROM ratings WHERE user_id = ? AND order_id = ?').get(user_id, order_id);
   if (exists) return res.json({ success: false, message: 'Already rated!' });
   db.prepare('INSERT INTO ratings (user_id, restaurant_id, order_id, rating, review) VALUES (?, ?, ?, ?, ?)').run(user_id, restaurant_id, order_id, rating, review);
@@ -426,46 +447,24 @@ app.post('/api/rating', (req, res) => {
   db.prepare('UPDATE restaurants SET rating = ? WHERE id = ?').run(avg.avg.toFixed(1), restaurant_id);
   res.json({ success: true });
 });
-
-app.get('/api/ratings/:restaurant_id', (req, res) => {
-  res.json(db.prepare('SELECT r.*, u.name as user_name FROM ratings r LEFT JOIN users u ON r.user_id = u.id WHERE r.restaurant_id = ? ORDER BY r.created_at DESC').all(req.params.restaurant_id));
-});
+app.get('/api/ratings/:restaurant_id', (req, res) => { res.json(db.prepare('SELECT r.*, u.name as user_name FROM ratings r LEFT JOIN users u ON r.user_id = u.id WHERE r.restaurant_id = ? ORDER BY r.created_at DESC').all(req.params.restaurant_id)); });
 
 // ===== NOTIFICATIONS =====
-app.get('/api/notifications', (req, res) => {
-  res.json(db.prepare('SELECT * FROM notifications ORDER BY created_at DESC LIMIT 20').all());
-});
-
-app.get('/api/notifications/unread', (req, res) => {
-  res.json({ count: db.prepare("SELECT COUNT(*) as count FROM notifications WHERE is_read = 0").get().count });
-});
-
-app.post('/api/notifications/read', (req, res) => {
-  db.prepare('UPDATE notifications SET is_read = 1').run();
-  res.json({ success: true });
-});
+app.get('/api/notifications', (req, res) => { res.json(db.prepare('SELECT * FROM notifications ORDER BY created_at DESC LIMIT 20').all()); });
+app.get('/api/notifications/unread', (req, res) => { res.json({ count: db.prepare("SELECT COUNT(*) as count FROM notifications WHERE is_read = 0").get().count }); });
+app.post('/api/notifications/read', (req, res) => { db.prepare('UPDATE notifications SET is_read = 1').run(); res.json({ success: true }); });
 
 // ===== BANNERS =====
-app.get('/api/banners', (req, res) => {
-  res.json(db.prepare('SELECT * FROM banners WHERE is_active = 1').all());
-});
-
+app.get('/api/banners', (req, res) => { res.json(db.prepare('SELECT * FROM banners WHERE is_active = 1').all()); });
 app.post('/api/banners/add', (req, res) => {
-  const { title, subtitle, button_text } = req.body;
-  db.prepare('INSERT INTO banners (title, subtitle, button_text) VALUES (?, ?, ?)').run(title, subtitle, button_text);
+  const { title, subtitle, button_text, image, link, is_video } = req.body;
+  db.prepare('INSERT INTO banners (title, subtitle, button_text, image, link, is_video) VALUES (?, ?, ?, ?, ?, ?)').run(title, subtitle, button_text, image || '', link || '', is_video ? 1 : 0);
   res.json({ success: true });
 });
-
-app.post('/api/banners/delete', (req, res) => {
-  db.prepare('UPDATE banners SET is_active = 0 WHERE id = ?').run(req.body.id);
-  res.json({ success: true });
-});
+app.post('/api/banners/delete', (req, res) => { db.prepare('UPDATE banners SET is_active = 0 WHERE id = ?').run(req.body.id); res.json({ success: true }); });
 
 // ===== COUPONS =====
-app.get('/api/coupons', (req, res) => {
-  res.json(db.prepare('SELECT * FROM coupons WHERE is_active = 1').all());
-});
-
+app.get('/api/coupons', (req, res) => { res.json(db.prepare('SELECT * FROM coupons WHERE is_active = 1').all()); });
 app.post('/api/coupons/verify', (req, res) => {
   const { code, total } = req.body;
   const coupon = db.prepare('SELECT * FROM coupons WHERE code = ? AND is_active = 1').get(code);
@@ -474,40 +473,25 @@ app.post('/api/coupons/verify', (req, res) => {
   const discount = coupon.type === 'percent' ? Math.floor(total * coupon.discount / 100) : coupon.discount;
   res.json({ success: true, discount, final: total - discount });
 });
-
 app.post('/api/coupons/add', (req, res) => {
   const { code, discount, type, min_order } = req.body;
   db.prepare('INSERT OR IGNORE INTO coupons (code, discount, type, min_order) VALUES (?, ?, ?, ?)').run(code, discount, type, min_order);
   res.json({ success: true });
 });
-
-app.post('/api/coupons/delete', (req, res) => {
-  db.prepare('UPDATE coupons SET is_active = 0 WHERE id = ?').run(req.body.id);
-  res.json({ success: true });
-});
+app.post('/api/coupons/delete', (req, res) => { db.prepare('UPDATE coupons SET is_active = 0 WHERE id = ?').run(req.body.id); res.json({ success: true }); });
 
 // ===== USERS =====
-app.get('/api/users', (req, res) => {
-  res.json(db.prepare("SELECT id, name, email, phone, role, created_at FROM users").all());
-});
+app.get('/api/users', (req, res) => { res.json(db.prepare("SELECT id, name, email, phone, role, created_at FROM users").all()); });
 
 // ===== APPLICATIONS =====
 app.post('/api/apply', (req, res) => {
-  const { full_name, father_name, phone, aadhar, dob, address, has_bike, bike_number, education } = req.body;
-  db.prepare('INSERT INTO applications (full_name, father_name, phone, aadhar, dob, address, has_bike, bike_number, education) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').run(full_name, father_name, phone, aadhar, dob, address, has_bike, bike_number, education);
+  const { full_name, father_name, phone, aadhar, dob, address, has_bike, bike_number } = req.body;
+  db.prepare('INSERT INTO applications (full_name, father_name, phone, aadhar, dob, address, has_bike, bike_number) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(full_name, father_name, phone, aadhar, dob, address, has_bike, bike_number);
   db.prepare('INSERT INTO notifications (title, message, type) VALUES (?, ?, ?)').run('New Application!', `${full_name} applied as delivery partner`, 'application');
   res.json({ success: true });
 });
-
-app.get('/api/applications', (req, res) => {
-  res.json(db.prepare('SELECT * FROM applications ORDER BY created_at DESC').all());
-});
-
-app.post('/api/application/status', (req, res) => {
-  const { id, status } = req.body;
-  db.prepare('UPDATE applications SET status = ? WHERE id = ?').run(status, id);
-  res.json({ success: true });
-});
+app.get('/api/applications', (req, res) => { res.json(db.prepare('SELECT * FROM applications ORDER BY created_at DESC').all()); });
+app.post('/api/application/status', (req, res) => { const { id, status } = req.body; db.prepare('UPDATE applications SET status = ? WHERE id = ?').run(status, id); res.json({ success: true }); });
 
 // ===== ANALYTICS =====
 app.get('/api/analytics', (req, res) => {
@@ -518,17 +502,15 @@ app.get('/api/analytics', (req, res) => {
   const pendingOrders = db.prepare("SELECT COUNT(*) as count FROM orders WHERE status = 'pending'").get().count;
   const todayOrders = db.prepare("SELECT COUNT(*) as count FROM orders WHERE date(created_at) = date('now')").get().count;
   const topRestaurants = db.prepare('SELECT restaurant_name, COUNT(*) as orders, SUM(total) as revenue FROM orders GROUP BY restaurant_name ORDER BY orders DESC LIMIT 5').all();
-
   const deliveredOrders = db.prepare("SELECT o.total, r.commission_percent FROM orders o LEFT JOIN restaurants r ON o.restaurant_id = r.id WHERE o.status = 'delivered'").all();
   const totalCommission = deliveredOrders.reduce((sum, o) => sum + Math.floor((o.total || 0) * (o.commission_percent || 15) / 100), 0);
-
-  const dboys = db.prepare('SELECT total_earned, advance_taken FROM delivery_boys').all();
-  const totalPendingPayout = dboys.reduce((sum, d) => sum + (d.total_earned - d.advance_taken), 0);
-
-  res.json({ totalOrders, totalRevenue, totalUsers, totalRestaurants, pendingOrders, todayOrders, topRestaurants, totalCommission, totalPendingPayout });
+  const dboys = db.prepare('SELECT total_earned, advance_taken, paid_out FROM delivery_boys WHERE is_active = 1').all();
+  const totalPendingPayout = dboys.reduce((sum, d) => sum + (d.total_earned - d.advance_taken - (d.paid_out || 0)), 0);
+  const onlineDeliveryBoys = db.prepare('SELECT COUNT(*) as count FROM delivery_boys WHERE is_online = 1 AND is_active = 1').get().count;
+  const openTickets = db.prepare("SELECT COUNT(*) as count FROM support_tickets WHERE status = 'open'").get().count;
+  res.json({ totalOrders, totalRevenue, totalUsers, totalRestaurants, pendingOrders, todayOrders, topRestaurants, totalCommission, totalPendingPayout, onlineDeliveryBoys, openTickets });
 });
 
-// Error handler
 app.use((err, req, res, next) => {
   console.error('SERVER ERROR:', err.message);
   res.status(500).json({ success: false, message: err.message });
