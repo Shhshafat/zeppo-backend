@@ -148,6 +148,8 @@ db.exec(`
     title TEXT, subtitle TEXT, image TEXT,
     button_text TEXT, is_active INTEGER DEFAULT 1,
     link TEXT, is_video INTEGER DEFAULT 0,
+    category TEXT DEFAULT 'food',
+    position TEXT DEFAULT 'top',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
   CREATE TABLE IF NOT EXISTS coupons (
@@ -457,8 +459,8 @@ app.post('/api/notifications/read', (req, res) => { db.prepare('UPDATE notificat
 // ===== BANNERS =====
 app.get('/api/banners', (req, res) => { res.json(db.prepare('SELECT * FROM banners WHERE is_active = 1').all()); });
 app.post('/api/banners/add', (req, res) => {
-  const { title, subtitle, button_text, image, link, is_video } = req.body;
-  db.prepare('INSERT INTO banners (title, subtitle, button_text, image, link, is_video) VALUES (?, ?, ?, ?, ?, ?)').run(title, subtitle, button_text, image || '', link || '', is_video ? 1 : 0);
+  const { title, subtitle, button_text, image, link, is_video, category, position } = req.body;
+  db.prepare('INSERT INTO banners (title, subtitle, button_text, image, link, is_video, category, position) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(title, subtitle, button_text, image || '', link || '', is_video ? 1 : 0, category || 'food', position || 'top');
   res.json({ success: true });
 });
 app.post('/api/banners/delete', (req, res) => { db.prepare('UPDATE banners SET is_active = 0 WHERE id = ?').run(req.body.id); res.json({ success: true }); });
