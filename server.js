@@ -1,5 +1,6 @@
 require('dotenv').config();
 const express = require('express');
+const rateLimit = require('express-rate-limit');
 const Database = require('better-sqlite3');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
@@ -27,6 +28,30 @@ const app = express();
 const db = new Database('zeppo.db');
 const SECRET = 'zeppo_secret_2024';
 
+// ===== RATE LIMITING =====
+// General API limiter - generous, just to stop spam/abuse
+const generalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 min
+  max: 300, // 300 requests per 15 min per IP
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: 'Too many requests. Please slow down and try again shortly.' },
+});
+// Strict limiter for sensitive actions (login, register, order placement)
+const strictLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20, // 20 attempts per 15 min per IP
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: 'Too many attempts. Please wait a few minutes and try again.' },
+});
+
+app.use(cors());
+app.use(express.json());
+app.use(express.static('.'));
+app.use('/uploads', express.static('uploads'));
+app.use('/api/', generalLimiter);
+
 const storage = new CloudinaryStorage({
   cloudinary: cloudinary,
   params: (req, file) => ({
@@ -37,16 +62,14 @@ const storage = new CloudinaryStorage({
 });
 const upload = multer({ storage, limits: { fileSize: 20 * 1024 * 1024 } });
 
-app.use(cors());
-app.use(express.json());
-app.use(express.static('.'));
-app.use('/uploads', express.static('uploads'));
-
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT, email TEXT UNIQUE, phone TEXT,
     password TEXT, role TEXT DEFAULT 'user',
+    referral_code TEXT UNIQUE,
+    referred_by TEXT,
+    wallet_balance INTEGER DEFAULT 0,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
   CREATE TABLE IF NOT EXISTS restaurants (
@@ -79,6 +102,7 @@ db.exec(`
     status TEXT DEFAULT 'pending',
     payment_method TEXT DEFAULT 'cash',
     payment_status TEXT DEFAULT 'pending',
+    refund_status TEXT DEFAULT 'none',
     delivery_boy_id INTEGER,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
@@ -176,6 +200,13 @@ db.exec(`
     status TEXT DEFAULT 'pending',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
+  CREATE TABLE IF NOT EXISTS referrals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    referrer_user_id INTEGER,
+    referred_user_id INTEGER,
+    reward_amount INTEGER DEFAULT 50,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
   CREATE TABLE IF NOT EXISTS coupons (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     code TEXT UNIQUE, discount INTEGER,
@@ -193,27 +224,56 @@ db.exec(`
   );
 `);
 
+// Migration safety: add columns if upgrading from older DB without breaking existing data
+try { db.exec(`ALTER TABLE orders ADD COLUMN refund_status TEXT DEFAULT 'none'`); } catch(e) {}
+try { db.exec(`ALTER TABLE users ADD COLUMN referral_code TEXT`); } catch(e) {}
+try { db.exec(`ALTER TABLE users ADD COLUMN referred_by TEXT`); } catch(e) {}
+try { db.exec(`ALTER TABLE users ADD COLUMN wallet_balance INTEGER DEFAULT 0`); } catch(e) {}
+
 const adminExists = db.prepare("SELECT * FROM users WHERE role='admin'").get();
 if (!adminExists) {
   const hashedPassword = bcrypt.hashSync('zeppo123', 10);
-  db.prepare("INSERT INTO users (name, email, phone, password, role) VALUES (?, ?, ?, ?, ?)").run('Shafat', 'admin@zeppo.com', '9999999999', hashedPassword, 'admin');
+  db.prepare("INSERT INTO users (name, email, phone, password, role, referral_code) VALUES (?, ?, ?, ?, ?, ?)").run('Shafat', 'admin@zeppo.com', '9999999999', hashedPassword, 'admin', 'ZEPPOADMIN');
 }
 const couponExists = db.prepare("SELECT * FROM coupons WHERE code='ZEPPO50'").get();
 if (!couponExists) {
   db.prepare("INSERT INTO coupons (code, discount, type, min_order) VALUES (?, ?, ?, ?)").run('ZEPPO50', 50, 'flat', 100);
 }
 
+function generateReferralCode(name) {
+  const base = (name || 'ZEPPO').replace(/[^a-zA-Z]/g, '').toUpperCase().slice(0, 5) || 'ZEPPO';
+  const rand = Math.floor(1000 + Math.random() * 9000);
+  return `${base}${rand}`;
+}
+
 // ===== AUTH =====
-app.post('/api/register', (req, res) => {
-  const { name, email, phone, password } = req.body;
+app.post('/api/register', strictLimiter, (req, res) => {
+  const { name, email, phone, password, referral_code } = req.body;
   if (!name || !email || !phone || !password) return res.json({ success: false, message: 'All fields required!' });
   const exists = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
   if (exists) return res.json({ success: false, message: 'Email already registered!' });
   const hashedPassword = bcrypt.hashSync(password, 10);
-  db.prepare('INSERT INTO users (name, email, phone, password) VALUES (?, ?, ?, ?)').run(name, email, phone, hashedPassword);
-  res.json({ success: true });
+  let myReferralCode = generateReferralCode(name);
+  while (db.prepare('SELECT * FROM users WHERE referral_code = ?').get(myReferralCode)) {
+    myReferralCode = generateReferralCode(name);
+  }
+  let referrer = null;
+  if (referral_code) {
+    referrer = db.prepare('SELECT * FROM users WHERE referral_code = ?').get(referral_code.toUpperCase().trim());
+  }
+  const result = db.prepare('INSERT INTO users (name, email, phone, password, referral_code, referred_by) VALUES (?, ?, ?, ?, ?, ?)').run(
+    name, email, phone, hashedPassword, myReferralCode, referrer ? referrer.referral_code : null
+  );
+  if (referrer) {
+    const REWARD = 50;
+    db.prepare('UPDATE users SET wallet_balance = wallet_balance + ? WHERE id = ?').run(REWARD, referrer.id);
+    db.prepare('UPDATE users SET wallet_balance = wallet_balance + ? WHERE id = ?').run(REWARD, result.lastInsertRowid);
+    db.prepare('INSERT INTO referrals (referrer_user_id, referred_user_id, reward_amount) VALUES (?, ?, ?)').run(referrer.id, result.lastInsertRowid, REWARD);
+    db.prepare('INSERT INTO notifications (title, message, type) VALUES (?, ?, ?)').run('Referral Reward! 🎉', `${referrer.name} referred ${name} — both earned ₹${REWARD} ZEPPO Money`, 'referral');
+  }
+  res.json({ success: true, referral_code: myReferralCode });
 });
-app.post('/api/login', (req, res) => {
+app.post('/api/login', strictLimiter, (req, res) => {
   const { emailOrPhone, password } = req.body;
   const user = db.prepare('SELECT * FROM users WHERE email = ? OR phone = ?').get(emailOrPhone, emailOrPhone);
   if (!user) return res.json({ success: false, message: 'Account not found!' });
@@ -222,7 +282,7 @@ app.post('/api/login', (req, res) => {
   const token = jwt.sign({ id: user.id, name: user.name, role: user.role }, SECRET, { expiresIn: '7d' });
   res.json({ success: true, token, name: user.name, role: user.role });
 });
-app.post('/api/forgot-password', async (req, res) => {
+app.post('/api/forgot-password', strictLimiter, async (req, res) => {
   const { email } = req.body;
   const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
   if (!user) return res.json({ success: true });
@@ -242,7 +302,7 @@ app.post('/api/forgot-password', async (req, res) => {
     res.json({ success: true });
   } catch (e) { console.error('EMAIL ERROR:', e.message); res.json({ success: false, message: 'Email bhejne mein error aaya!' }); }
 });
-app.post('/api/reset-password', (req, res) => {
+app.post('/api/reset-password', strictLimiter, (req, res) => {
   const { token, newPassword } = req.body;
   const reset = db.prepare('SELECT * FROM password_resets WHERE token = ? AND used = 0').get(token);
   if (!reset) return res.json({ success: false, message: 'Invalid or expired link!' });
@@ -251,6 +311,25 @@ app.post('/api/reset-password', (req, res) => {
   db.prepare('UPDATE users SET password = ? WHERE id = ?').run(hashedPassword, reset.user_id);
   db.prepare('UPDATE password_resets SET used = 1 WHERE id = ?').run(reset.id);
   res.json({ success: true });
+});
+
+// ===== WALLET / REFERRAL =====
+app.get('/api/wallet/me', (req, res) => {
+  const auth = req.headers.authorization;
+  if (!auth) return res.json({ balance: 0, referral_code: null });
+  try {
+    const decoded = jwt.verify(auth.split(' ')[1], SECRET);
+    const user = db.prepare('SELECT wallet_balance, referral_code FROM users WHERE id = ?').get(decoded.id);
+    res.json({ balance: user?.wallet_balance || 0, referral_code: user?.referral_code || null });
+  } catch (e) { res.json({ balance: 0, referral_code: null }); }
+});
+app.get('/api/referrals/me', (req, res) => {
+  const auth = req.headers.authorization;
+  if (!auth) return res.json([]);
+  try {
+    const decoded = jwt.verify(auth.split(' ')[1], SECRET);
+    res.json(db.prepare(`SELECT r.*, u.name as referred_name FROM referrals r LEFT JOIN users u ON r.referred_user_id = u.id WHERE r.referrer_user_id = ? ORDER BY r.created_at DESC`).all(decoded.id));
+  } catch (e) { res.json([]); }
 });
 
 // ===== IMAGE UPLOAD =====
@@ -304,7 +383,7 @@ app.post('/api/menu/toggle', (req, res) => { const { id, is_available } = req.bo
 app.post('/api/menu/delete', (req, res) => { db.prepare('DELETE FROM menu_items WHERE id = ?').run(req.body.id); res.json({ success: true }); });
 
 // ===== ORDERS =====
-app.post('/api/order', (req, res) => {
+app.post('/api/order', strictLimiter, (req, res) => {
   const { customer_name, customer_phone, customer_address, restaurant_id, restaurant_name, items, total, payment_method } = req.body;
   let user_id = null;
   const auth = req.headers.authorization;
@@ -339,7 +418,24 @@ app.get('/api/delivery-orders', (req, res) => {
   } catch(e) { res.json([]); }
 });
 app.post('/api/orders/assign', (req, res) => { const { order_id, delivery_boy_id } = req.body; db.prepare('UPDATE orders SET delivery_boy_id = ? WHERE id = ?').run(delivery_boy_id, order_id); res.json({ success: true }); });
-app.post('/api/orders/cancel', (req, res) => { db.prepare("UPDATE orders SET status = 'cancelled' WHERE id = ?").run(req.body.id); res.json({ success: true }); });
+app.post('/api/orders/cancel', (req, res) => {
+  const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(req.body.id);
+  const refundStatus = (order && order.payment_method === 'upi') ? 'pending' : 'none';
+  db.prepare("UPDATE orders SET status = 'cancelled', refund_status = ? WHERE id = ?").run(refundStatus, req.body.id);
+  if (refundStatus === 'pending') {
+    db.prepare('INSERT INTO notifications (title, message, type) VALUES (?, ?, ?)').run('Refund Pending 💰', `Order #${req.body.id} (₹${order.total}) needs a UPI refund to ${order.customer_name}`, 'refund');
+  }
+  res.json({ success: true });
+});
+
+// ===== REFUNDS (Admin) =====
+app.get('/api/orders/refunds', (req, res) => {
+  res.json(db.prepare("SELECT * FROM orders WHERE refund_status IN ('pending', 'refunded') ORDER BY created_at DESC").all());
+});
+app.post('/api/orders/refunds/complete', (req, res) => {
+  db.prepare("UPDATE orders SET refund_status = 'refunded' WHERE id = ?").run(req.body.id);
+  res.json({ success: true });
+});
 
 // ===== DELIVERY BOYS =====
 app.get('/api/delivery-boys', (req, res) => { res.json(db.prepare('SELECT * FROM delivery_boys WHERE is_active = 1').all()); });
@@ -350,7 +446,7 @@ app.post('/api/delivery-boys/add', (req, res) => {
     const exists = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
     if (exists) return res.json({ success: false, message: 'Email already used!' });
     const hashedPassword = bcrypt.hashSync(password, 10);
-    const result = db.prepare("INSERT INTO users (name, email, phone, password, role) VALUES (?, ?, ?, ?, 'delivery')").run(name, email, phone, hashedPassword);
+    const result = db.prepare("INSERT INTO users (name, email, phone, password, role, referral_code) VALUES (?, ?, ?, ?, 'delivery', ?)").run(name, email, phone, hashedPassword, generateReferralCode(name));
     user_id = result.lastInsertRowid;
   }
   db.prepare('INSERT INTO delivery_boys (user_id, name, phone, salary_per_delivery) VALUES (?, ?, ?, ?)').run(user_id, name, phone, salary_per_delivery || 50);
@@ -552,7 +648,7 @@ app.post('/api/coupons/add', (req, res) => {
 app.post('/api/coupons/delete', (req, res) => { db.prepare('UPDATE coupons SET is_active = 0 WHERE id = ?').run(req.body.id); res.json({ success: true }); });
 
 // ===== USERS =====
-app.get('/api/users', (req, res) => { res.json(db.prepare("SELECT id, name, email, phone, role, created_at FROM users").all()); });
+app.get('/api/users', (req, res) => { res.json(db.prepare("SELECT id, name, email, phone, role, wallet_balance, referral_code, created_at FROM users").all()); });
 
 // ===== APPLICATIONS =====
 app.post('/api/apply', (req, res) => {
@@ -579,7 +675,8 @@ app.get('/api/analytics', (req, res) => {
   const totalPendingPayout = dboys.reduce((sum, d) => sum + (d.total_earned - d.advance_taken - (d.paid_out || 0)), 0);
   const onlineDeliveryBoys = db.prepare('SELECT COUNT(*) as count FROM delivery_boys WHERE is_online = 1 AND is_active = 1').get().count;
   const openTickets = db.prepare("SELECT COUNT(*) as count FROM support_tickets WHERE status = 'open'").get().count;
-  res.json({ totalOrders, totalRevenue, totalUsers, totalRestaurants, pendingOrders, todayOrders, topRestaurants, totalCommission, totalPendingPayout, onlineDeliveryBoys, openTickets });
+  const pendingRefunds = db.prepare("SELECT COUNT(*) as count FROM orders WHERE refund_status = 'pending'").get().count;
+  res.json({ totalOrders, totalRevenue, totalUsers, totalRestaurants, pendingOrders, todayOrders, topRestaurants, totalCommission, totalPendingPayout, onlineDeliveryBoys, openTickets, pendingRefunds });
 });
 
 app.use((err, req, res, next) => {
