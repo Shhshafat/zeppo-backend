@@ -30,7 +30,7 @@ const SECRET = 'zeppo_secret_2024';
 const storage = new CloudinaryStorage({
   cloudinary: cloudinary,
   params: (req, file) => ({
-    folder: req.path.includes('restaurant') ? 'zeppo/restaurants' : req.path.includes('banner') ? 'zeppo/banners' : 'zeppo/food',
+    folder: req.path.includes('restaurant') ? 'zeppo/restaurants' : req.path.includes('banner') ? 'zeppo/banners' : req.path.includes('stay') ? 'zeppo/stays' : 'zeppo/food',
     resource_type: req.path.includes('banner') ? 'auto' : 'image',
     allowed_formats: req.path.includes('banner') ? ['jpg', 'jpeg', 'png', 'webp', 'mp4', 'mov'] : ['jpg', 'jpeg', 'png', 'webp'],
   }),
@@ -152,6 +152,30 @@ db.exec(`
     position TEXT DEFAULT 'top',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
+  CREATE TABLE IF NOT EXISTS app_settings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    key TEXT UNIQUE,
+    value TEXT
+  );
+  CREATE TABLE IF NOT EXISTS stays (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT, type TEXT DEFAULT 'Hotel',
+    price_per_night INTEGER, address TEXT,
+    phone TEXT, amenities TEXT,
+    rating TEXT DEFAULT '4.5',
+    images TEXT,
+    description TEXT,
+    is_active INTEGER DEFAULT 1,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE TABLE IF NOT EXISTS stay_bookings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    stay_id INTEGER, stay_name TEXT,
+    customer_name TEXT, customer_phone TEXT,
+    check_in TEXT, check_out TEXT, guests INTEGER DEFAULT 1,
+    status TEXT DEFAULT 'pending',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
   CREATE TABLE IF NOT EXISTS coupons (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     code TEXT UNIQUE, discount INTEGER,
@@ -237,6 +261,7 @@ app.post('/api/upload/banner', upload.single('image'), (req, res) => {
   const isVideo = req.file.mimetype && req.file.mimetype.startsWith('video');
   res.json({ success: true, url: req.file.path, is_video: isVideo ? 1 : 0 });
 });
+app.post('/api/upload/stay', upload.single('image'), (req, res) => { if (!req.file) return res.json({ success: false }); res.json({ success: true, url: req.file.path }); });
 
 // ===== RESTAURANTS =====
 app.get('/api/restaurants', (req, res) => { res.json(db.prepare('SELECT * FROM restaurants WHERE active = 1').all()); });
@@ -464,6 +489,50 @@ app.post('/api/banners/add', (req, res) => {
   res.json({ success: true });
 });
 app.post('/api/banners/delete', (req, res) => { db.prepare('UPDATE banners SET is_active = 0 WHERE id = ?').run(req.body.id); res.json({ success: true }); });
+
+// ===== APP SETTINGS =====
+app.get('/api/settings', (req, res) => {
+  const rows = db.prepare('SELECT * FROM app_settings').all();
+  const settings = {};
+  rows.forEach(r => settings[r.key] = r.value);
+  res.json(settings);
+});
+app.post('/api/settings', (req, res) => {
+  const { key, value } = req.body;
+  db.prepare('INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = ?').run(key, value, value);
+  res.json({ success: true });
+});
+
+// ===== STAYS =====
+app.get('/api/stays', (req, res) => { res.json(db.prepare('SELECT * FROM stays WHERE is_active = 1').all()); });
+app.post('/api/stays/add', (req, res) => {
+  const { name, type, price_per_night, address, phone, amenities, images, description } = req.body;
+  db.prepare('INSERT INTO stays (name, type, price_per_night, address, phone, amenities, images, description) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
+    name, type || 'Hotel', price_per_night, address, phone || '', amenities || '', JSON.stringify(images || []), description || ''
+  );
+  res.json({ success: true });
+});
+app.post('/api/stays/update', (req, res) => {
+  const { id, name, type, price_per_night, address, phone, amenities, images, description } = req.body;
+  db.prepare('UPDATE stays SET name=?, type=?, price_per_night=?, address=?, phone=?, amenities=?, images=?, description=? WHERE id=?').run(
+    name, type, price_per_night, address, phone || '', amenities || '', JSON.stringify(images || []), description || '', id
+  );
+  res.json({ success: true });
+});
+app.post('/api/stays/delete', (req, res) => { db.prepare('UPDATE stays SET is_active = 0 WHERE id = ?').run(req.body.id); res.json({ success: true }); });
+
+app.post('/api/stays/book', (req, res) => {
+  const { stay_id, stay_name, customer_name, customer_phone, check_in, check_out, guests } = req.body;
+  db.prepare('INSERT INTO stay_bookings (stay_id, stay_name, customer_name, customer_phone, check_in, check_out, guests) VALUES (?, ?, ?, ?, ?, ?, ?)').run(stay_id, stay_name, customer_name, customer_phone, check_in, check_out, guests || 1);
+  db.prepare('INSERT INTO notifications (title, message, type) VALUES (?, ?, ?)').run('New Stay Booking Request!', `${customer_name} wants to book ${stay_name} (${check_in} to ${check_out})`, 'booking');
+  res.json({ success: true });
+});
+app.get('/api/stays/bookings', (req, res) => { res.json(db.prepare('SELECT * FROM stay_bookings ORDER BY created_at DESC').all()); });
+app.post('/api/stays/bookings/status', (req, res) => {
+  const { id, status } = req.body;
+  db.prepare('UPDATE stay_bookings SET status = ? WHERE id = ?').run(status, id);
+  res.json({ success: true });
+});
 
 // ===== COUPONS =====
 app.get('/api/coupons', (req, res) => { res.json(db.prepare('SELECT * FROM coupons WHERE is_active = 1').all()); });
