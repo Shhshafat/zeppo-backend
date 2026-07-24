@@ -207,6 +207,14 @@ db.exec(`
     reward_amount INTEGER DEFAULT 50,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
+  CREATE TABLE IF NOT EXISTS addresses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    type TEXT DEFAULT 'Other',
+    address TEXT,
+    is_default INTEGER DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
   CREATE TABLE IF NOT EXISTS coupons (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     code TEXT UNIQUE, discount INTEGER,
@@ -329,6 +337,67 @@ app.get('/api/referrals/me', (req, res) => {
   try {
     const decoded = jwt.verify(auth.split(' ')[1], SECRET);
     res.json(db.prepare(`SELECT r.*, u.name as referred_name FROM referrals r LEFT JOIN users u ON r.referred_user_id = u.id WHERE r.referrer_user_id = ? ORDER BY r.created_at DESC`).all(decoded.id));
+  } catch (e) { res.json([]); }
+});
+
+// ===== ADDRESSES =====
+app.get('/api/addresses/me', (req, res) => {
+  const auth = req.headers.authorization;
+  if (!auth) return res.json([]);
+  try {
+    const decoded = jwt.verify(auth.split(' ')[1], SECRET);
+    res.json(db.prepare('SELECT * FROM addresses WHERE user_id = ? ORDER BY is_default DESC, created_at DESC').all(decoded.id));
+  } catch (e) { res.json([]); }
+});
+app.post('/api/addresses/add', (req, res) => {
+  const auth = req.headers.authorization;
+  if (!auth) return res.json({ success: false });
+  try {
+    const decoded = jwt.verify(auth.split(' ')[1], SECRET);
+    const { type, address } = req.body;
+    if (!address || !address.trim()) return res.json({ success: false, message: 'Address required!' });
+    const existing = db.prepare('SELECT COUNT(*) as count FROM addresses WHERE user_id = ?').get(decoded.id);
+    db.prepare('INSERT INTO addresses (user_id, type, address, is_default) VALUES (?, ?, ?, ?)').run(decoded.id, type || 'Other', address.trim(), existing.count === 0 ? 1 : 0);
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false }); }
+});
+app.post('/api/addresses/update', (req, res) => {
+  const auth = req.headers.authorization;
+  if (!auth) return res.json({ success: false });
+  try {
+    const decoded = jwt.verify(auth.split(' ')[1], SECRET);
+    const { id, type, address } = req.body;
+    db.prepare('UPDATE addresses SET type = ?, address = ? WHERE id = ? AND user_id = ?').run(type, address, id, decoded.id);
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false }); }
+});
+app.post('/api/addresses/delete', (req, res) => {
+  const auth = req.headers.authorization;
+  if (!auth) return res.json({ success: false });
+  try {
+    const decoded = jwt.verify(auth.split(' ')[1], SECRET);
+    db.prepare('DELETE FROM addresses WHERE id = ? AND user_id = ?').run(req.body.id, decoded.id);
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false }); }
+});
+app.post('/api/addresses/set-default', (req, res) => {
+  const auth = req.headers.authorization;
+  if (!auth) return res.json({ success: false });
+  try {
+    const decoded = jwt.verify(auth.split(' ')[1], SECRET);
+    db.prepare('UPDATE addresses SET is_default = 0 WHERE user_id = ?').run(decoded.id);
+    db.prepare('UPDATE addresses SET is_default = 1 WHERE id = ? AND user_id = ?').run(req.body.id, decoded.id);
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false }); }
+});
+
+// ===== MY REFUNDS (Customer) =====
+app.get('/api/my-refunds', (req, res) => {
+  const auth = req.headers.authorization;
+  if (!auth) return res.json([]);
+  try {
+    const decoded = jwt.verify(auth.split(' ')[1], SECRET);
+    res.json(db.prepare("SELECT * FROM orders WHERE user_id = ? AND refund_status IN ('pending', 'refunded') ORDER BY created_at DESC").all(decoded.id));
   } catch (e) { res.json([]); }
 });
 
