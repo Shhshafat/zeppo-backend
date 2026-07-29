@@ -56,7 +56,7 @@ app.use('/api/', generalLimiter);
 const storage = new CloudinaryStorage({
   cloudinary: cloudinary,
   params: (req, file) => ({
-    folder: req.path.includes('restaurant') ? 'zeppo/restaurants' : req.path.includes('banner') ? 'zeppo/banners' : req.path.includes('stay') ? 'zeppo/stays' : 'zeppo/food',
+    folder: req.path.includes('restaurant') ? 'zeppo/restaurants' : req.path.includes('banner') ? 'zeppo/banners' : req.path.includes('stay') ? 'zeppo/stays' : req.path.includes('tile') ? 'zeppo/tiles' : 'zeppo/food',
     resource_type: req.path.includes('banner') ? 'auto' : 'image',
     allowed_formats: req.path.includes('banner') ? ['jpg', 'jpeg', 'png', 'webp', 'mp4', 'mov'] : ['jpg', 'jpeg', 'png', 'webp'],
   }),
@@ -77,9 +77,10 @@ async function setupDatabase() {
   await q(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS discount_percent INTEGER DEFAULT 0;`);
   await q(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS free_delivery INTEGER DEFAULT 1;`);
   await q(`CREATE TABLE IF NOT EXISTS dineout_tiles (
-    id SERIAL PRIMARY KEY, label TEXT, icon TEXT DEFAULT 'star', filter_type TEXT DEFAULT 'none',
+    id SERIAL PRIMARY KEY, label TEXT, icon TEXT DEFAULT 'star', image TEXT DEFAULT '', filter_type TEXT DEFAULT 'none',
     filter_value TEXT DEFAULT '', sort_order INTEGER DEFAULT 0, is_active INTEGER DEFAULT 1,
     created_at TIMESTAMP DEFAULT NOW());`);
+  await q(`ALTER TABLE dineout_tiles ADD COLUMN IF NOT EXISTS image TEXT DEFAULT '';`);
   await q(`CREATE TABLE IF NOT EXISTS menu_items (
     id SERIAL PRIMARY KEY, restaurant_id INTEGER, category TEXT, name TEXT, price INTEGER,
     original_price INTEGER, portions TEXT, is_veg INTEGER DEFAULT 1, description TEXT,
@@ -310,6 +311,7 @@ app.post('/api/upload/banner', upload.single('image'), (req, res) => {
   res.json({ success: true, url: req.file.path, is_video: isVideo ? 1 : 0 });
 });
 app.post('/api/upload/stay', upload.single('image'), (req, res) => { if (!req.file) return res.json({ success: false }); res.json({ success: true, url: req.file.path }); });
+app.post('/api/upload/tile', upload.single('image'), (req, res) => { if (!req.file) return res.json({ success: false }); res.json({ success: true, url: req.file.path }); });
 
 app.get('/api/restaurants', async (req, res) => { try { const r = await q('SELECT * FROM restaurants WHERE active = 1'); res.json(r.rows); } catch (e) { res.json([]); } });
 app.post('/api/restaurants/add', async (req, res) => {
@@ -337,15 +339,15 @@ app.get('/api/dineout-tiles', async (req, res) => { try { const r = await q('SEL
 app.get('/api/dineout-tiles/all', async (req, res) => { try { const r = await q('SELECT * FROM dineout_tiles ORDER BY sort_order ASC, id ASC'); res.json(r.rows); } catch (e) { res.json([]); } });
 app.post('/api/dineout-tiles/add', async (req, res) => {
   try {
-    const { label, icon, filter_type, filter_value, sort_order } = req.body;
-    await q('INSERT INTO dineout_tiles (label, icon, filter_type, filter_value, sort_order) VALUES ($1,$2,$3,$4,$5)', [label, icon || 'star', filter_type || 'none', filter_value || '', sort_order || 0]);
+    const { label, icon, image, filter_type, filter_value, sort_order } = req.body;
+    await q('INSERT INTO dineout_tiles (label, icon, image, filter_type, filter_value, sort_order) VALUES ($1,$2,$3,$4,$5,$6)', [label, icon || 'star', image || '', filter_type || 'none', filter_value || '', sort_order || 0]);
     res.json({ success: true });
   } catch (e) { console.error(e); res.json({ success: false }); }
 });
 app.post('/api/dineout-tiles/update', async (req, res) => {
   try {
-    const { id, label, icon, filter_type, filter_value, sort_order, is_active } = req.body;
-    await q('UPDATE dineout_tiles SET label=$1, icon=$2, filter_type=$3, filter_value=$4, sort_order=$5, is_active=$6 WHERE id=$7', [label, icon, filter_type, filter_value, sort_order, is_active, id]);
+    const { id, label, icon, image, filter_type, filter_value, sort_order, is_active } = req.body;
+    await q('UPDATE dineout_tiles SET label=$1, icon=$2, image=$3, filter_type=$4, filter_value=$5, sort_order=$6, is_active=$7 WHERE id=$8', [label, icon, image || '', filter_type, filter_value, sort_order, is_active, id]);
     res.json({ success: true });
   } catch (e) { res.json({ success: false }); }
 });
