@@ -71,8 +71,14 @@ async function setupDatabase() {
   await q(`CREATE TABLE IF NOT EXISTS restaurants (
     id SERIAL PRIMARY KEY, name TEXT, category TEXT, emoji TEXT, address TEXT, description TEXT,
     image TEXT, rating TEXT DEFAULT '4.5', is_open INTEGER DEFAULT 1, active INTEGER DEFAULT 1,
-    commission_percent INTEGER DEFAULT 15, phone TEXT, min_order INTEGER DEFAULT 0,
+    commission_percent INTEGER DEFAULT 15, discount_percent INTEGER DEFAULT 0, phone TEXT, min_order INTEGER DEFAULT 0,
     delivery_charge INTEGER DEFAULT 0, opening_time TEXT DEFAULT '09:00', closing_time TEXT DEFAULT '23:00',
+    created_at TIMESTAMP DEFAULT NOW());`);
+  await q(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS discount_percent INTEGER DEFAULT 0;`);
+  await q(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS free_delivery INTEGER DEFAULT 1;`);
+  await q(`CREATE TABLE IF NOT EXISTS dineout_tiles (
+    id SERIAL PRIMARY KEY, label TEXT, icon TEXT DEFAULT 'star', filter_type TEXT DEFAULT 'none',
+    filter_value TEXT DEFAULT '', sort_order INTEGER DEFAULT 0, is_active INTEGER DEFAULT 1,
     created_at TIMESTAMP DEFAULT NOW());`);
   await q(`CREATE TABLE IF NOT EXISTS menu_items (
     id SERIAL PRIMARY KEY, restaurant_id INTEGER, category TEXT, name TEXT, price INTEGER,
@@ -116,6 +122,9 @@ async function setupDatabase() {
   await q(`CREATE TABLE IF NOT EXISTS stay_bookings (
     id SERIAL PRIMARY KEY, stay_id INTEGER, stay_name TEXT, customer_name TEXT, customer_phone TEXT,
     check_in TEXT, check_out TEXT, guests INTEGER DEFAULT 1, status TEXT DEFAULT 'pending', created_at TIMESTAMP DEFAULT NOW());`);
+  await q(`CREATE TABLE IF NOT EXISTS table_bookings (
+    id SERIAL PRIMARY KEY, restaurant_id INTEGER, restaurant_name TEXT, customer_name TEXT, customer_phone TEXT,
+    booking_date TEXT, booking_time TEXT, guests INTEGER DEFAULT 2, status TEXT DEFAULT 'pending', created_at TIMESTAMP DEFAULT NOW());`);
   await q(`CREATE TABLE IF NOT EXISTS referrals (
     id SERIAL PRIMARY KEY, referrer_user_id INTEGER, referred_user_id INTEGER, reward_amount INTEGER DEFAULT 50, created_at TIMESTAMP DEFAULT NOW());`);
   await q(`CREATE TABLE IF NOT EXISTS addresses (
@@ -135,6 +144,14 @@ async function setupDatabase() {
   const couponRes = await q("SELECT * FROM coupons WHERE code='ZEPPO50'");
   if (couponRes.rows.length === 0) {
     await q("INSERT INTO coupons (code, discount, type, min_order) VALUES ($1,$2,$3,$4)", ['ZEPPO50', 50, 'flat', 100]);
+  }
+  const tilesRes = await q('SELECT * FROM dineout_tiles');
+  if (tilesRes.rows.length === 0) {
+    await q(`INSERT INTO dineout_tiles (label, icon, filter_type, filter_value, sort_order) VALUES
+      ('Up To\n20% OFF', 'percent', 'discount', '', 1),
+      ('Fine\nDining', 'award', 'category', 'fine', 2),
+      ('Top\nCafes', 'coffee', 'category', 'cafe', 3),
+      ('City''s\nTop Spots', 'trending-up', 'rating', '4', 4);`);
   }
   console.log('Database ready ✅');
 }
@@ -188,7 +205,7 @@ app.post('/api/login', strictLimiter, async (req, res) => {
     if (!user) return res.json({ success: false, message: 'Account not found!' });
     const valid = bcrypt.compareSync(password, user.password);
     if (!valid) return res.json({ success: false, message: 'Wrong password!' });
-    const token = jwt.sign({ id: user.id, name: user.name, role: user.role }, SECRET, { expiresIn: '7d' });
+    const token = jwt.sign({ id: user.id, name: user.name, role: user.role }, SECRET, { expiresIn: '90d' });
     res.json({ success: true, token, name: user.name, role: user.role });
   } catch (e) { console.error(e); res.status(500).json({ success: false, message: 'Server error' }); }
 });
@@ -297,23 +314,42 @@ app.post('/api/upload/stay', upload.single('image'), (req, res) => { if (!req.fi
 app.get('/api/restaurants', async (req, res) => { try { const r = await q('SELECT * FROM restaurants WHERE active = 1'); res.json(r.rows); } catch (e) { res.json([]); } });
 app.post('/api/restaurants/add', async (req, res) => {
   try {
-    const { name, category, emoji, address, description, image, commission_percent, phone, min_order, delivery_charge, opening_time, closing_time } = req.body;
-    await q('INSERT INTO restaurants (name, category, emoji, address, description, image, commission_percent, phone, min_order, delivery_charge, opening_time, closing_time) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)',
-      [name, category, emoji || '🍽️', address, description || '', image || '', commission_percent || 15, phone || '', min_order || 0, delivery_charge || 0, opening_time || '09:00', closing_time || '23:00']);
+    const { name, category, emoji, address, description, image, commission_percent, discount_percent, free_delivery, phone, min_order, delivery_charge, opening_time, closing_time } = req.body;
+    await q('INSERT INTO restaurants (name, category, emoji, address, description, image, commission_percent, discount_percent, free_delivery, phone, min_order, delivery_charge, opening_time, closing_time) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)',
+      [name, category, emoji || '🍽️', address, description || '', image || '', commission_percent || 15, discount_percent || 0, free_delivery !== undefined ? free_delivery : 1, phone || '', min_order || 0, delivery_charge || 0, opening_time || '09:00', closing_time || '23:00']);
     await q('INSERT INTO notifications (title, message, type) VALUES ($1,$2,$3)', ['New Restaurant!', name + ' added', 'restaurant']);
     res.json({ success: true });
   } catch (e) { console.error(e); res.json({ success: false }); }
 });
 app.post('/api/restaurants/update', async (req, res) => {
   try {
-    const { id, name, category, emoji, address, description, image, is_open, commission_percent, phone, min_order, delivery_charge, opening_time, closing_time } = req.body;
-    await q('UPDATE restaurants SET name=$1, category=$2, emoji=$3, address=$4, description=$5, image=$6, is_open=$7, commission_percent=$8, phone=$9, min_order=$10, delivery_charge=$11, opening_time=$12, closing_time=$13 WHERE id=$14',
-      [name, category, emoji, address, description, image, is_open, commission_percent || 15, phone || '', min_order || 0, delivery_charge || 0, opening_time || '09:00', closing_time || '23:00', id]);
+    const { id, name, category, emoji, address, description, image, is_open, commission_percent, discount_percent, free_delivery, phone, min_order, delivery_charge, opening_time, closing_time } = req.body;
+    await q('UPDATE restaurants SET name=$1, category=$2, emoji=$3, address=$4, description=$5, image=$6, is_open=$7, commission_percent=$8, discount_percent=$9, free_delivery=$10, phone=$11, min_order=$12, delivery_charge=$13, opening_time=$14, closing_time=$15 WHERE id=$16',
+      [name, category, emoji, address, description, image, is_open, commission_percent || 15, discount_percent || 0, free_delivery !== undefined ? free_delivery : 1, phone || '', min_order || 0, delivery_charge || 0, opening_time || '09:00', closing_time || '23:00', id]);
     res.json({ success: true });
   } catch (e) { res.json({ success: false }); }
 });
 app.post('/api/restaurants/delete', async (req, res) => { await q('UPDATE restaurants SET active = 0 WHERE id = $1', [req.body.id]); res.json({ success: true }); });
 app.post('/api/restaurants/toggle', async (req, res) => { const { id, is_open } = req.body; await q('UPDATE restaurants SET is_open = $1 WHERE id = $2', [is_open, id]); res.json({ success: true }); });
+
+// ===== DINEOUT TILES (admin-managed hero shortcuts, e.g. "Up To 20% OFF", "Fine Dining") =====
+app.get('/api/dineout-tiles', async (req, res) => { try { const r = await q('SELECT * FROM dineout_tiles WHERE is_active = 1 ORDER BY sort_order ASC, id ASC'); res.json(r.rows); } catch (e) { res.json([]); } });
+app.get('/api/dineout-tiles/all', async (req, res) => { try { const r = await q('SELECT * FROM dineout_tiles ORDER BY sort_order ASC, id ASC'); res.json(r.rows); } catch (e) { res.json([]); } });
+app.post('/api/dineout-tiles/add', async (req, res) => {
+  try {
+    const { label, icon, filter_type, filter_value, sort_order } = req.body;
+    await q('INSERT INTO dineout_tiles (label, icon, filter_type, filter_value, sort_order) VALUES ($1,$2,$3,$4,$5)', [label, icon || 'star', filter_type || 'none', filter_value || '', sort_order || 0]);
+    res.json({ success: true });
+  } catch (e) { console.error(e); res.json({ success: false }); }
+});
+app.post('/api/dineout-tiles/update', async (req, res) => {
+  try {
+    const { id, label, icon, filter_type, filter_value, sort_order, is_active } = req.body;
+    await q('UPDATE dineout_tiles SET label=$1, icon=$2, filter_type=$3, filter_value=$4, sort_order=$5, is_active=$6 WHERE id=$7', [label, icon, filter_type, filter_value, sort_order, is_active, id]);
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false }); }
+});
+app.post('/api/dineout-tiles/delete', async (req, res) => { await q('DELETE FROM dineout_tiles WHERE id = $1', [req.body.id]); res.json({ success: true }); });
 
 app.get('/api/menu/:restaurant_id', async (req, res) => { try { const r = await q('SELECT * FROM menu_items WHERE restaurant_id = $1 ORDER BY category', [req.params.restaurant_id]); res.json(r.rows); } catch (e) { res.json([]); } });
 app.post('/api/menu/add', async (req, res) => {
@@ -590,6 +626,19 @@ app.post('/api/stays/book', async (req, res) => {
 });
 app.get('/api/stays/bookings', async (req, res) => { try { const r = await q('SELECT * FROM stay_bookings ORDER BY created_at DESC'); res.json(r.rows); } catch (e) { res.json([]); } });
 app.post('/api/stays/bookings/status', async (req, res) => { const { id, status } = req.body; await q('UPDATE stay_bookings SET status = $1 WHERE id = $2', [status, id]); res.json({ success: true }); });
+
+// ===== TABLE BOOKINGS (Dineout) =====
+app.post('/api/tables/book', async (req, res) => {
+  try {
+    const { restaurant_id, restaurant_name, customer_name, customer_phone, booking_date, booking_time, guests } = req.body;
+    await q('INSERT INTO table_bookings (restaurant_id, restaurant_name, customer_name, customer_phone, booking_date, booking_time, guests) VALUES ($1,$2,$3,$4,$5,$6,$7)',
+      [restaurant_id, restaurant_name, customer_name, customer_phone, booking_date, booking_time, guests || 2]);
+    await q('INSERT INTO notifications (title, message, type) VALUES ($1,$2,$3)', ['New Table Booking! 🍽️', customer_name + ' wants a table at ' + restaurant_name + ' on ' + booking_date + ' ' + booking_time, 'table_booking']);
+    res.json({ success: true });
+  } catch (e) { console.error(e); res.json({ success: false }); }
+});
+app.get('/api/tables/bookings', async (req, res) => { try { const r = await q('SELECT * FROM table_bookings ORDER BY created_at DESC'); res.json(r.rows); } catch (e) { res.json([]); } });
+app.post('/api/tables/bookings/status', async (req, res) => { const { id, status } = req.body; await q('UPDATE table_bookings SET status = $1 WHERE id = $2', [status, id]); res.json({ success: true }); });
 
 app.get('/api/coupons', async (req, res) => { try { const r = await q('SELECT * FROM coupons WHERE is_active = 1'); res.json(r.rows); } catch (e) { res.json([]); } });
 app.post('/api/coupons/verify', async (req, res) => {
