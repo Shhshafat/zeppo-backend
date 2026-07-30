@@ -76,11 +76,25 @@ async function setupDatabase() {
     created_at TIMESTAMP DEFAULT NOW());`);
   await q(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS discount_percent INTEGER DEFAULT 0;`);
   await q(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS free_delivery INTEGER DEFAULT 1;`);
+  await q(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS user_id INTEGER;`);
+  await q(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS lat DOUBLE PRECISION;`);
+  await q(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS lng DOUBLE PRECISION;`);
+  await q(`ALTER TABLE delivery_boys ADD COLUMN IF NOT EXISTS lat DOUBLE PRECISION;`);
+  await q(`ALTER TABLE delivery_boys ADD COLUMN IF NOT EXISTS lng DOUBLE PRECISION;`);
+  await q(`ALTER TABLE delivery_boys ADD COLUMN IF NOT EXISTS location_updated_at TIMESTAMP;`);
+  await q(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_lat DOUBLE PRECISION;`);
+  await q(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_lng DOUBLE PRECISION;`);
+  await q(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_distance_km DOUBLE PRECISION;`);
+  await q(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_fee INTEGER DEFAULT 0;`);
   await q(`CREATE TABLE IF NOT EXISTS dineout_tiles (
     id SERIAL PRIMARY KEY, label TEXT, icon TEXT DEFAULT 'star', image TEXT DEFAULT '', filter_type TEXT DEFAULT 'none',
     filter_value TEXT DEFAULT '', sort_order INTEGER DEFAULT 0, is_active INTEGER DEFAULT 1,
     created_at TIMESTAMP DEFAULT NOW());`);
   await q(`ALTER TABLE dineout_tiles ADD COLUMN IF NOT EXISTS image TEXT DEFAULT '';`);
+  await q(`CREATE TABLE IF NOT EXISTS stays_tiles (
+    id SERIAL PRIMARY KEY, label TEXT, icon TEXT DEFAULT 'star', image TEXT DEFAULT '', filter_type TEXT DEFAULT 'none',
+    filter_value TEXT DEFAULT '', sort_order INTEGER DEFAULT 0, is_active INTEGER DEFAULT 1,
+    created_at TIMESTAMP DEFAULT NOW());`);
   await q(`CREATE TABLE IF NOT EXISTS menu_items (
     id SERIAL PRIMARY KEY, restaurant_id INTEGER, category TEXT, name TEXT, price INTEGER,
     original_price INTEGER, portions TEXT, is_veg INTEGER DEFAULT 1, description TEXT,
@@ -154,6 +168,19 @@ async function setupDatabase() {
       ('Top\nCafes', 'coffee', 'category', 'cafe', 3),
       ('City''s\nTop Spots', 'trending-up', 'rating', '4', 4);`);
   }
+  const staysTilesRes = await q('SELECT * FROM stays_tiles');
+  if (staysTilesRes.rows.length === 0) {
+    await q(`INSERT INTO stays_tiles (label, icon, filter_type, filter_value, sort_order) VALUES
+      ('Top\nRated', 'star', 'rating', '4', 1),
+      ('Budget\nStays', 'tag', 'budget', '2000', 2),
+      ('Luxury\nStays', 'award', 'luxury', '3000', 3),
+      ('Near\nMe', 'map-pin', 'none', '', 4);`);
+  }
+  const feeSettingRes = await q("SELECT * FROM app_settings WHERE key='delivery_base_fee'");
+  if (feeSettingRes.rows.length === 0) {
+    await q("INSERT INTO app_settings (key, value) VALUES ($1,$2)", ['delivery_base_fee', '15']);
+    await q("INSERT INTO app_settings (key, value) VALUES ($1,$2)", ['delivery_per_km_rate', '8']);
+  }
   console.log('Database ready ✅');
 }
 
@@ -161,6 +188,41 @@ function generateReferralCode(name) {
   const base = (name || 'ZEPPO').replace(/[^a-zA-Z]/g, '').toUpperCase().slice(0, 5) || 'ZEPPO';
   const rand = Math.floor(1000 + Math.random() * 9000);
   return base + rand;
+}
+
+// Straight-line distance in km between two lat/lng points — good enough for a small-town
+// delivery radius like Kupwara, and needs no external maps API or extra cost.
+function haversineKm(lat1, lng1, lat2, lng2) {
+  if (lat1 == null || lng1 == null || lat2 == null || lng2 == null) return null;
+  const R = 6371;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLng = (lng2 - lng1) * Math.PI / 180;
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLng / 2) ** 2;
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
+// Finds the closest online, unoccupied delivery boy to a given point and assigns them to the order.
+async function autoAssignDeliveryBoy(orderId, restaurantLat, restaurantLng) {
+  if (restaurantLat == null || restaurantLng == null) return null;
+  const dbRes = await q(`
+    SELECT d.* FROM delivery_boys d
+    WHERE d.is_active = 1 AND d.is_online = 1 AND d.lat IS NOT NULL AND d.lng IS NOT NULL
+    AND d.id NOT IN (
+      SELECT delivery_boy_id FROM orders
+      WHERE delivery_boy_id IS NOT NULL AND status IN ('confirmed','preparing','on_the_way')
+    )
+  `);
+  if (dbRes.rows.length === 0) return null;
+  let nearest = null;
+  let nearestDist = Infinity;
+  for (const d of dbRes.rows) {
+    const dist = haversineKm(restaurantLat, restaurantLng, d.lat, d.lng);
+    if (dist !== null && dist < nearestDist) { nearestDist = dist; nearest = d; }
+  }
+  if (!nearest) return null;
+  await q('UPDATE orders SET delivery_boy_id = $1 WHERE id = $2', [nearest.id, orderId]);
+  return nearest;
 }
 function verifyToken(req) {
   const auth = req.headers.authorization;
@@ -316,23 +378,75 @@ app.post('/api/upload/tile', upload.single('image'), (req, res) => { if (!req.fi
 app.get('/api/restaurants', async (req, res) => { try { const r = await q('SELECT * FROM restaurants WHERE active = 1'); res.json(r.rows); } catch (e) { res.json([]); } });
 app.post('/api/restaurants/add', async (req, res) => {
   try {
-    const { name, category, emoji, address, description, image, commission_percent, discount_percent, free_delivery, phone, min_order, delivery_charge, opening_time, closing_time } = req.body;
-    await q('INSERT INTO restaurants (name, category, emoji, address, description, image, commission_percent, discount_percent, free_delivery, phone, min_order, delivery_charge, opening_time, closing_time) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)',
-      [name, category, emoji || '🍽️', address, description || '', image || '', commission_percent || 15, discount_percent || 0, free_delivery !== undefined ? free_delivery : 1, phone || '', min_order || 0, delivery_charge || 0, opening_time || '09:00', closing_time || '23:00']);
+    const { name, category, emoji, address, description, image, commission_percent, discount_percent, free_delivery, phone, min_order, delivery_charge, opening_time, closing_time, login_email, login_password, lat, lng } = req.body;
+    let user_id = null;
+    if (login_email && login_password) {
+      const exists = await q('SELECT * FROM users WHERE email = $1', [login_email]);
+      if (exists.rows.length > 0) return res.json({ success: false, message: 'Email already used for another login!' });
+      const hashedPassword = bcrypt.hashSync(login_password, 10);
+      const result = await q("INSERT INTO users (name, email, phone, password, role, referral_code) VALUES ($1,$2,$3,$4,'restaurant',$5) RETURNING id", [name, login_email, phone || '', hashedPassword, generateReferralCode(name)]);
+      user_id = result.rows[0].id;
+    }
+    await q('INSERT INTO restaurants (name, category, emoji, address, description, image, commission_percent, discount_percent, free_delivery, phone, min_order, delivery_charge, opening_time, closing_time, user_id, lat, lng) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)',
+      [name, category, emoji || '🍽️', address, description || '', image || '', commission_percent || 15, discount_percent || 0, free_delivery !== undefined ? free_delivery : 1, phone || '', min_order || 0, delivery_charge || 0, opening_time || '09:00', closing_time || '23:00', user_id, lat || null, lng || null]);
     await q('INSERT INTO notifications (title, message, type) VALUES ($1,$2,$3)', ['New Restaurant!', name + ' added', 'restaurant']);
     res.json({ success: true });
   } catch (e) { console.error(e); res.json({ success: false }); }
 });
 app.post('/api/restaurants/update', async (req, res) => {
   try {
-    const { id, name, category, emoji, address, description, image, is_open, commission_percent, discount_percent, free_delivery, phone, min_order, delivery_charge, opening_time, closing_time } = req.body;
-    await q('UPDATE restaurants SET name=$1, category=$2, emoji=$3, address=$4, description=$5, image=$6, is_open=$7, commission_percent=$8, discount_percent=$9, free_delivery=$10, phone=$11, min_order=$12, delivery_charge=$13, opening_time=$14, closing_time=$15 WHERE id=$16',
-      [name, category, emoji, address, description, image, is_open, commission_percent || 15, discount_percent || 0, free_delivery !== undefined ? free_delivery : 1, phone || '', min_order || 0, delivery_charge || 0, opening_time || '09:00', closing_time || '23:00', id]);
+    const { id, name, category, emoji, address, description, image, is_open, commission_percent, discount_percent, free_delivery, phone, min_order, delivery_charge, opening_time, closing_time, lat, lng } = req.body;
+    await q('UPDATE restaurants SET name=$1, category=$2, emoji=$3, address=$4, description=$5, image=$6, is_open=$7, commission_percent=$8, discount_percent=$9, free_delivery=$10, phone=$11, min_order=$12, delivery_charge=$13, opening_time=$14, closing_time=$15, lat=$16, lng=$17 WHERE id=$18',
+      [name, category, emoji, address, description, image, is_open, commission_percent || 15, discount_percent || 0, free_delivery !== undefined ? free_delivery : 1, phone || '', min_order || 0, delivery_charge || 0, opening_time || '09:00', closing_time || '23:00', lat || null, lng || null, id]);
     res.json({ success: true });
   } catch (e) { res.json({ success: false }); }
 });
 app.post('/api/restaurants/delete', async (req, res) => { await q('UPDATE restaurants SET active = 0 WHERE id = $1', [req.body.id]); res.json({ success: true }); });
 app.post('/api/restaurants/toggle', async (req, res) => { const { id, is_open } = req.body; await q('UPDATE restaurants SET is_open = $1 WHERE id = $2', [is_open, id]); res.json({ success: true }); });
+
+// ===== RESTAURANT SELF-SERVICE (their own login, their own orders only) =====
+app.get('/api/restaurant/me', async (req, res) => {
+  const decoded = verifyToken(req);
+  if (!decoded || decoded.role !== 'restaurant') return res.json(null);
+  try { const r = await q('SELECT * FROM restaurants WHERE user_id = $1', [decoded.id]); res.json(r.rows[0] || null); } catch (e) { res.json(null); }
+});
+app.get('/api/restaurant/orders', async (req, res) => {
+  const decoded = verifyToken(req);
+  if (!decoded || decoded.role !== 'restaurant') return res.json([]);
+  try {
+    const rr = await q('SELECT * FROM restaurants WHERE user_id = $1', [decoded.id]);
+    const rest = rr.rows[0];
+    if (!rest) return res.json([]);
+    const r = await q('SELECT * FROM orders WHERE restaurant_id = $1 ORDER BY created_at DESC', [rest.id]);
+    res.json(r.rows);
+  } catch (e) { res.json([]); }
+});
+app.post('/api/restaurant/orders/status', async (req, res) => {
+  const decoded = verifyToken(req);
+  if (!decoded || decoded.role !== 'restaurant') return res.json({ success: false });
+  try {
+    const { id, status } = req.body;
+    // A restaurant can only move an order forward through its own prep stages —
+    // it can never touch delivery assignment or mark something delivered; that stays with admin.
+    if (!['confirmed', 'preparing'].includes(status)) return res.json({ success: false, message: 'Not allowed' });
+    const rr = await q('SELECT * FROM restaurants WHERE user_id = $1', [decoded.id]);
+    const rest = rr.rows[0];
+    if (!rest) return res.json({ success: false });
+    const or = await q('SELECT * FROM orders WHERE id = $1 AND restaurant_id = $2', [id, rest.id]);
+    if (or.rows.length === 0) return res.json({ success: false, message: 'Order not found' });
+    await q('UPDATE orders SET status = $1 WHERE id = $2', [status, id]);
+    let assigned = null;
+    if (status === 'confirmed' && !or.rows[0].delivery_boy_id) {
+      assigned = await autoAssignDeliveryBoy(id, rest.lat, rest.lng);
+      if (assigned) {
+        await q('INSERT INTO notifications (title, message, type) VALUES ($1,$2,$3)', ['Auto-Assigned 🛵', assigned.name + ' assigned to order #' + id + ' (' + rest.name + ')', 'assign']);
+      } else {
+        await q('INSERT INTO notifications (title, message, type) VALUES ($1,$2,$3)', ['No Delivery Boy Free ⚠️', 'Order #' + id + ' at ' + rest.name + ' needs a delivery boy assigned manually', 'assign_failed']);
+      }
+    }
+    res.json({ success: true, assigned: assigned ? assigned.name : null });
+  } catch (e) { res.json({ success: false }); }
+});
 
 // ===== DINEOUT TILES (admin-managed hero shortcuts, e.g. "Up To 20% OFF", "Fine Dining") =====
 app.get('/api/dineout-tiles', async (req, res) => { try { const r = await q('SELECT * FROM dineout_tiles WHERE is_active = 1 ORDER BY sort_order ASC, id ASC'); res.json(r.rows); } catch (e) { res.json([]); } });
@@ -352,6 +466,25 @@ app.post('/api/dineout-tiles/update', async (req, res) => {
   } catch (e) { res.json({ success: false }); }
 });
 app.post('/api/dineout-tiles/delete', async (req, res) => { await q('DELETE FROM dineout_tiles WHERE id = $1', [req.body.id]); res.json({ success: true }); });
+
+// ===== STAYS TILES (admin-managed hero shortcuts for the Stays tab) =====
+app.get('/api/stays-tiles', async (req, res) => { try { const r = await q('SELECT * FROM stays_tiles WHERE is_active = 1 ORDER BY sort_order ASC, id ASC'); res.json(r.rows); } catch (e) { res.json([]); } });
+app.get('/api/stays-tiles/all', async (req, res) => { try { const r = await q('SELECT * FROM stays_tiles ORDER BY sort_order ASC, id ASC'); res.json(r.rows); } catch (e) { res.json([]); } });
+app.post('/api/stays-tiles/add', async (req, res) => {
+  try {
+    const { label, icon, image, filter_type, filter_value, sort_order } = req.body;
+    await q('INSERT INTO stays_tiles (label, icon, image, filter_type, filter_value, sort_order) VALUES ($1,$2,$3,$4,$5,$6)', [label, icon || 'star', image || '', filter_type || 'none', filter_value || '', sort_order || 0]);
+    res.json({ success: true });
+  } catch (e) { console.error(e); res.json({ success: false }); }
+});
+app.post('/api/stays-tiles/update', async (req, res) => {
+  try {
+    const { id, label, icon, image, filter_type, filter_value, sort_order, is_active } = req.body;
+    await q('UPDATE stays_tiles SET label=$1, icon=$2, image=$3, filter_type=$4, filter_value=$5, sort_order=$6, is_active=$7 WHERE id=$8', [label, icon, image || '', filter_type, filter_value, sort_order, is_active, id]);
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false }); }
+});
+app.post('/api/stays-tiles/delete', async (req, res) => { await q('DELETE FROM stays_tiles WHERE id = $1', [req.body.id]); res.json({ success: true }); });
 
 app.get('/api/menu/:restaurant_id', async (req, res) => { try { const r = await q('SELECT * FROM menu_items WHERE restaurant_id = $1 ORDER BY category', [req.params.restaurant_id]); res.json(r.rows); } catch (e) { res.json([]); } });
 app.post('/api/menu/add', async (req, res) => {
@@ -373,22 +506,68 @@ app.post('/api/menu/update', async (req, res) => {
 app.post('/api/menu/toggle', async (req, res) => { const { id, is_available } = req.body; await q('UPDATE menu_items SET is_available = $1 WHERE id = $2', [is_available, id]); res.json({ success: true }); });
 app.post('/api/menu/delete', async (req, res) => { await q('DELETE FROM menu_items WHERE id = $1', [req.body.id]); res.json({ success: true }); });
 
+// Shared fee logic — used both when actually placing an order and when previewing the fee live in the cart
+async function computeDeliveryFee(rest, customerLat, customerLng) {
+  let delivery_distance_km = null;
+  let delivery_fee = 0;
+  if (!rest) return { delivery_distance_km, delivery_fee };
+  if (customerLat != null && customerLng != null && rest.lat != null && rest.lng != null) {
+    delivery_distance_km = haversineKm(rest.lat, rest.lng, customerLat, customerLng);
+  }
+  if (rest.free_delivery) {
+    delivery_fee = 0;
+  } else if (delivery_distance_km !== null) {
+    const settingsR = await q('SELECT * FROM app_settings');
+    const settings = {};
+    settingsR.rows.forEach((row) => { settings[row.key] = row.value; });
+    const baseFee = parseInt(settings.delivery_base_fee) || 15;
+    const perKmRate = parseInt(settings.delivery_per_km_rate) || 8;
+    delivery_fee = Math.round(baseFee + perKmRate * delivery_distance_km);
+  } else {
+    delivery_fee = rest.delivery_charge || 0;
+  }
+  return { delivery_distance_km, delivery_fee };
+}
+
+app.get('/api/delivery-fee-preview', async (req, res) => {
+  try {
+    const { restaurant_id, lat, lng } = req.query;
+    const restR = await q('SELECT * FROM restaurants WHERE id = $1', [restaurant_id]);
+    const result = await computeDeliveryFee(restR.rows[0], lat ? parseFloat(lat) : null, lng ? parseFloat(lng) : null);
+    res.json(result);
+  } catch (e) { res.json({ delivery_distance_km: null, delivery_fee: 0 }); }
+});
+
 app.post('/api/order', strictLimiter, async (req, res) => {
   try {
-    const { customer_name, customer_phone, customer_address, restaurant_id, restaurant_name, items, total, payment_method } = req.body;
+    const { customer_name, customer_phone, customer_address, restaurant_id, restaurant_name, items, total, payment_method, customer_lat, customer_lng } = req.body;
     const decoded = verifyToken(req);
     const user_id = decoded ? decoded.id : null;
-    await q('INSERT INTO orders (user_id, customer_name, customer_phone, customer_address, restaurant_id, restaurant_name, items, total, payment_method) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)',
-      [user_id, customer_name, customer_phone, customer_address, restaurant_id, restaurant_name, JSON.stringify(items), total, payment_method || 'cash']);
+
+    const restR = await q('SELECT * FROM restaurants WHERE id = $1', [restaurant_id]);
+    const rest = restR.rows[0];
+    const { delivery_distance_km, delivery_fee } = await computeDeliveryFee(rest, customer_lat, customer_lng);
+
+    await q('INSERT INTO orders (user_id, customer_name, customer_phone, customer_address, restaurant_id, restaurant_name, items, total, payment_method, customer_lat, customer_lng, delivery_distance_km, delivery_fee) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)',
+      [user_id, customer_name, customer_phone, customer_address, restaurant_id, restaurant_name, JSON.stringify(items), total, payment_method || 'cash', customer_lat || null, customer_lng || null, delivery_distance_km, delivery_fee]);
     await q('INSERT INTO notifications (title, message, type) VALUES ($1,$2,$3)', ['New Order! 🛵', customer_name + ' ordered from ' + restaurant_name + ' — ₹' + total, 'order']);
-    res.json({ success: true });
+    res.json({ success: true, delivery_fee, delivery_distance_km });
   } catch (e) { console.error(e); res.json({ success: false }); }
 });
 app.get('/api/orders', async (req, res) => { try { const r = await q('SELECT * FROM orders ORDER BY created_at DESC'); res.json(r.rows); } catch (e) { res.json([]); } });
 app.post('/api/orders/status', async (req, res) => {
   try {
     const { id, status } = req.body;
+    const before = await q('SELECT * FROM orders WHERE id = $1', [id]);
     await q('UPDATE orders SET status = $1 WHERE id = $2', [status, id]);
+    if (status === 'confirmed' && before.rows[0] && !before.rows[0].delivery_boy_id) {
+      const restR = await q('SELECT * FROM restaurants WHERE id = $1', [before.rows[0].restaurant_id]);
+      const rest = restR.rows[0];
+      if (rest) {
+        const assigned = await autoAssignDeliveryBoy(id, rest.lat, rest.lng);
+        if (assigned) await q('INSERT INTO notifications (title, message, type) VALUES ($1,$2,$3)', ['Auto-Assigned 🛵', assigned.name + ' assigned to order #' + id, 'assign']);
+      }
+    }
     if (status === 'delivered') {
       const r = await q('SELECT * FROM orders WHERE id = $1', [id]);
       const order = r.rows[0];
@@ -475,6 +654,7 @@ app.post('/api/delivery-boys/toggle-online', async (req, res) => {
   const decoded = verifyToken(req);
   if (!decoded) return res.json({ success: false });
   try {
+    const { lat, lng } = req.body;
     const dr = await q('SELECT * FROM delivery_boys WHERE user_id = $1', [decoded.id]);
     const dboy = dr.rows[0];
     if (!dboy) return res.json({ success: false });
@@ -484,10 +664,22 @@ app.post('/api/delivery-boys/toggle-online', async (req, res) => {
       if (shiftR.rows[0]) await q('UPDATE delivery_shifts SET check_out = NOW() WHERE id = $1', [shiftR.rows[0].id]);
       res.json({ success: true, is_online: 0 });
     } else {
-      await q('UPDATE delivery_boys SET is_online = 1 WHERE id = $1', [dboy.id]);
+      await q('UPDATE delivery_boys SET is_online = 1, lat = $1, lng = $2, location_updated_at = NOW() WHERE id = $3', [lat || null, lng || null, dboy.id]);
       await q('INSERT INTO delivery_shifts (delivery_boy_id, check_in) VALUES ($1, NOW())', [dboy.id]);
       res.json({ success: true, is_online: 1 });
     }
+  } catch (e) { res.json({ success: false }); }
+});
+app.post('/api/delivery-boys/update-location', async (req, res) => {
+  const decoded = verifyToken(req);
+  if (!decoded) return res.json({ success: false });
+  try {
+    const { lat, lng } = req.body;
+    const dr = await q('SELECT * FROM delivery_boys WHERE user_id = $1', [decoded.id]);
+    const dboy = dr.rows[0];
+    if (!dboy) return res.json({ success: false });
+    await q('UPDATE delivery_boys SET lat = $1, lng = $2, location_updated_at = NOW() WHERE id = $3', [lat, lng, dboy.id]);
+    res.json({ success: true });
   } catch (e) { res.json({ success: false }); }
 });
 app.get('/api/delivery-boys/my-shifts', async (req, res) => {
