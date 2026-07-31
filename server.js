@@ -56,7 +56,7 @@ app.use('/api/', generalLimiter);
 const storage = new CloudinaryStorage({
   cloudinary: cloudinary,
   params: (req, file) => ({
-    folder: req.path.includes('restaurant') ? 'zeppo/restaurants' : req.path.includes('banner') ? 'zeppo/banners' : req.path.includes('stay') ? 'zeppo/stays' : req.path.includes('tile') ? 'zeppo/tiles' : 'zeppo/food',
+    folder: req.path.includes('restaurant') ? 'zeppo/restaurants' : req.path.includes('banner') ? 'zeppo/banners' : req.path.includes('stay') ? 'zeppo/stays' : req.path.includes('tile') ? 'zeppo/tiles' : req.path.includes('document') ? 'zeppo/documents' : 'zeppo/food',
     resource_type: req.path.includes('banner') ? 'auto' : 'image',
     allowed_formats: req.path.includes('banner') ? ['jpg', 'jpeg', 'png', 'webp', 'mp4', 'mov'] : ['jpg', 'jpeg', 'png', 'webp'],
   }),
@@ -77,6 +77,11 @@ async function setupDatabase() {
   await q(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS discount_percent INTEGER DEFAULT 0;`);
   await q(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS free_delivery INTEGER DEFAULT 1;`);
   await q(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS user_id INTEGER;`);
+  await q(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS fssai_license TEXT;`);
+  await q(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS fssai_document TEXT;`);
+  await q(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS gst_number TEXT;`);
+  await q(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS owner_name TEXT;`);
+  await q(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS verification_status TEXT DEFAULT 'pending';`);
   await q(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS lat DOUBLE PRECISION;`);
   await q(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS lng DOUBLE PRECISION;`);
   await q(`ALTER TABLE delivery_boys ADD COLUMN IF NOT EXISTS lat DOUBLE PRECISION;`);
@@ -86,6 +91,7 @@ async function setupDatabase() {
   await q(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_lng DOUBLE PRECISION;`);
   await q(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_distance_km DOUBLE PRECISION;`);
   await q(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_fee INTEGER DEFAULT 0;`);
+  await q(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_accepted INTEGER DEFAULT NULL;`);
   await q(`CREATE TABLE IF NOT EXISTS dineout_tiles (
     id SERIAL PRIMARY KEY, label TEXT, icon TEXT DEFAULT 'star', image TEXT DEFAULT '', filter_type TEXT DEFAULT 'none',
     filter_value TEXT DEFAULT '', sort_order INTEGER DEFAULT 0, is_active INTEGER DEFAULT 1,
@@ -202,26 +208,32 @@ function haversineKm(lat1, lng1, lat2, lng2) {
   return R * c;
 }
 
-// Finds the closest online, unoccupied delivery boy to a given point and assigns them to the order.
-async function autoAssignDeliveryBoy(orderId, restaurantLat, restaurantLng) {
+// Offers an order to the closest online, unoccupied delivery boy — they still have to accept it.
+// "Occupied" includes both a pending offer they haven't responded to yet, and any order they're
+// already actively working, so nobody gets double-booked.
+async function autoAssignDeliveryBoy(orderId, restaurantLat, restaurantLng, excludeIds = []) {
   if (restaurantLat == null || restaurantLng == null) return null;
   const dbRes = await q(`
     SELECT d.* FROM delivery_boys d
     WHERE d.is_active = 1 AND d.is_online = 1 AND d.lat IS NOT NULL AND d.lng IS NOT NULL
     AND d.id NOT IN (
       SELECT delivery_boy_id FROM orders
-      WHERE delivery_boy_id IS NOT NULL AND status IN ('confirmed','preparing','on_the_way')
+      WHERE delivery_boy_id IS NOT NULL
+      AND (delivery_accepted IS NULL OR delivery_accepted = 1)
+      AND status IN ('confirmed','preparing','on_the_way')
     )
   `);
-  if (dbRes.rows.length === 0) return null;
+  const candidates = dbRes.rows.filter((d) => !excludeIds.includes(d.id));
+  if (candidates.length === 0) return null;
   let nearest = null;
   let nearestDist = Infinity;
-  for (const d of dbRes.rows) {
+  for (const d of candidates) {
     const dist = haversineKm(restaurantLat, restaurantLng, d.lat, d.lng);
     if (dist !== null && dist < nearestDist) { nearestDist = dist; nearest = d; }
   }
   if (!nearest) return null;
-  await q('UPDATE orders SET delivery_boy_id = $1 WHERE id = $2', [nearest.id, orderId]);
+  // delivery_accepted stays NULL — this is an offer, not a done deal, until they respond
+  await q('UPDATE orders SET delivery_boy_id = $1, delivery_accepted = NULL WHERE id = $2', [nearest.id, orderId]);
   return nearest;
 }
 function verifyToken(req) {
@@ -374,6 +386,7 @@ app.post('/api/upload/banner', upload.single('image'), (req, res) => {
 });
 app.post('/api/upload/stay', upload.single('image'), (req, res) => { if (!req.file) return res.json({ success: false }); res.json({ success: true, url: req.file.path }); });
 app.post('/api/upload/tile', upload.single('image'), (req, res) => { if (!req.file) return res.json({ success: false }); res.json({ success: true, url: req.file.path }); });
+app.post('/api/upload/document', upload.single('image'), (req, res) => { if (!req.file) return res.json({ success: false }); res.json({ success: true, url: req.file.path }); });
 
 app.get('/api/restaurants', async (req, res) => { try { const r = await q('SELECT * FROM restaurants WHERE active = 1'); res.json(r.rows); } catch (e) { res.json([]); } });
 app.post('/api/restaurants/add', async (req, res) => {
@@ -403,12 +416,68 @@ app.post('/api/restaurants/update', async (req, res) => {
 });
 app.post('/api/restaurants/delete', async (req, res) => { await q('UPDATE restaurants SET active = 0 WHERE id = $1', [req.body.id]); res.json({ success: true }); });
 app.post('/api/restaurants/toggle', async (req, res) => { const { id, is_open } = req.body; await q('UPDATE restaurants SET is_open = $1 WHERE id = $2', [is_open, id]); res.json({ success: true }); });
+app.post('/api/restaurants/verify', async (req, res) => {
+  try {
+    const { id, verification_status } = req.body;
+    await q('UPDATE restaurants SET verification_status = $1 WHERE id = $2', [verification_status, id]);
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false }); }
+});
 
 // ===== RESTAURANT SELF-SERVICE (their own login, their own orders only) =====
 app.get('/api/restaurant/me', async (req, res) => {
   const decoded = verifyToken(req);
   if (!decoded || decoded.role !== 'restaurant') return res.json(null);
   try { const r = await q('SELECT * FROM restaurants WHERE user_id = $1', [decoded.id]); res.json(r.rows[0] || null); } catch (e) { res.json(null); }
+});
+
+app.get('/api/restaurant/earnings', async (req, res) => {
+  const decoded = verifyToken(req);
+  if (!decoded || decoded.role !== 'restaurant') return res.json(null);
+  try {
+    const rr = await q('SELECT * FROM restaurants WHERE user_id = $1', [decoded.id]);
+    const rest = rr.rows[0];
+    if (!rest) return res.json(null);
+
+    const totalOrders = parseInt((await q('SELECT COUNT(*) FROM orders WHERE restaurant_id = $1', [rest.id])).rows[0].count);
+    const todayOrders = parseInt((await q("SELECT COUNT(*) FROM orders WHERE restaurant_id = $1 AND created_at::date = CURRENT_DATE", [rest.id])).rows[0].count);
+    const deliveredRes = await q("SELECT SUM(total) as sum, COUNT(*) as cnt FROM orders WHERE restaurant_id = $1 AND status = 'delivered'", [rest.id]);
+    const totalRevenue = parseInt(deliveredRes.rows[0].sum) || 0;
+    const deliveredCount = parseInt(deliveredRes.rows[0].cnt) || 0;
+    const todayRevenueRes = await q("SELECT SUM(total) as sum FROM orders WHERE restaurant_id = $1 AND status = 'delivered' AND created_at::date = CURRENT_DATE", [rest.id]);
+    const todayRevenue = parseInt(todayRevenueRes.rows[0].sum) || 0;
+    const weekRevenueRes = await q("SELECT SUM(total) as sum FROM orders WHERE restaurant_id = $1 AND status = 'delivered' AND created_at >= NOW() - INTERVAL '7 days'", [rest.id]);
+    const weekRevenue = parseInt(weekRevenueRes.rows[0].sum) || 0;
+
+    const commissionPercent = rest.commission_percent || 15;
+    const totalCommission = Math.floor(totalRevenue * commissionPercent / 100);
+    const netEarnings = totalRevenue - totalCommission;
+
+    const settledRes = await q("SELECT SUM(amount) as sum FROM settlements WHERE type = 'restaurant' AND party_id = $1", [rest.id]);
+    const settled = parseInt(settledRes.rows[0].sum) || 0;
+    const pendingPayout = totalCommission - settled > 0 ? 0 : Math.abs(totalCommission - settled); // amount owed TO restaurant is netEarnings minus what's already been settled against commission — simplified below
+    const pendingCommissionOwed = Math.max(0, totalCommission - settled);
+
+    const cancelledCount = parseInt((await q("SELECT COUNT(*) FROM orders WHERE restaurant_id = $1 AND status = 'cancelled'", [rest.id])).rows[0].count);
+
+    res.json({
+      totalOrders, todayOrders, deliveredCount, cancelledCount,
+      totalRevenue, todayRevenue, weekRevenue,
+      commissionPercent, totalCommission, netEarnings,
+      settled, pendingCommissionOwed,
+    });
+  } catch (e) { console.error(e); res.json(null); }
+});
+
+app.post('/api/restaurant/documents', async (req, res) => {
+  const decoded = verifyToken(req);
+  if (!decoded || decoded.role !== 'restaurant') return res.json({ success: false });
+  try {
+    const { owner_name, fssai_license, fssai_document, gst_number } = req.body;
+    await q('UPDATE restaurants SET owner_name=$1, fssai_license=$2, fssai_document=$3, gst_number=$4, verification_status=$5 WHERE user_id=$6',
+      [owner_name || '', fssai_license || '', fssai_document || '', gst_number || '', 'pending', decoded.id]);
+    res.json({ success: true });
+  } catch (e) { console.error(e); res.json({ success: false }); }
 });
 app.get('/api/restaurant/orders', async (req, res) => {
   const decoded = verifyToken(req);
@@ -434,17 +503,13 @@ app.post('/api/restaurant/orders/status', async (req, res) => {
     if (!rest) return res.json({ success: false });
     const or = await q('SELECT * FROM orders WHERE id = $1 AND restaurant_id = $2', [id, rest.id]);
     if (or.rows.length === 0) return res.json({ success: false, message: 'Order not found' });
-    await q('UPDATE orders SET status = $1 WHERE id = $2', [status, id]);
-    let assigned = null;
-    if (status === 'confirmed' && !or.rows[0].delivery_boy_id) {
-      assigned = await autoAssignDeliveryBoy(id, rest.lat, rest.lng);
-      if (assigned) {
-        await q('INSERT INTO notifications (title, message, type) VALUES ($1,$2,$3)', ['Auto-Assigned 🛵', assigned.name + ' assigned to order #' + id + ' (' + rest.name + ')', 'assign']);
-      } else {
-        await q('INSERT INTO notifications (title, message, type) VALUES ($1,$2,$3)', ['No Delivery Boy Free ⚠️', 'Order #' + id + ' at ' + rest.name + ' needs a delivery boy assigned manually', 'assign_failed']);
-      }
+    // Cooking shouldn't start until someone has actually accepted the delivery —
+    // otherwise food gets made with nobody free to pick it up.
+    if (status === 'confirmed' && or.rows[0].delivery_accepted !== 1) {
+      return res.json({ success: false, message: 'Waiting for a delivery partner to accept this order first' });
     }
-    res.json({ success: true, assigned: assigned ? assigned.name : null });
+    await q('UPDATE orders SET status = $1 WHERE id = $2', [status, id]);
+    res.json({ success: true });
   } catch (e) { res.json({ success: false }); }
 });
 
@@ -548,10 +613,20 @@ app.post('/api/order', strictLimiter, async (req, res) => {
     const rest = restR.rows[0];
     const { delivery_distance_km, delivery_fee } = await computeDeliveryFee(rest, customer_lat, customer_lng);
 
-    await q('INSERT INTO orders (user_id, customer_name, customer_phone, customer_address, restaurant_id, restaurant_name, items, total, payment_method, customer_lat, customer_lng, delivery_distance_km, delivery_fee) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)',
+    const insertRes = await q('INSERT INTO orders (user_id, customer_name, customer_phone, customer_address, restaurant_id, restaurant_name, items, total, payment_method, customer_lat, customer_lng, delivery_distance_km, delivery_fee) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id',
       [user_id, customer_name, customer_phone, customer_address, restaurant_id, restaurant_name, JSON.stringify(items), total, payment_method || 'cash', customer_lat || null, customer_lng || null, delivery_distance_km, delivery_fee]);
+    const newOrderId = insertRes.rows[0].id;
+
+    // Look for a delivery partner right away — the restaurant will only see "start cooking"
+    // once someone has actually accepted, so food never gets made for nobody to pick up.
+    let assignedRider = null;
+    if (rest) assignedRider = await autoAssignDeliveryBoy(newOrderId, rest.lat, rest.lng);
+
     await q('INSERT INTO notifications (title, message, type) VALUES ($1,$2,$3)', ['New Order! 🛵', customer_name + ' ordered from ' + restaurant_name + ' — ₹' + total, 'order']);
-    res.json({ success: true, delivery_fee, delivery_distance_km });
+    if (!assignedRider) {
+      await q('INSERT INTO notifications (title, message, type) VALUES ($1,$2,$3)', ['No Delivery Boy Free ⚠️', 'Order #' + newOrderId + ' at ' + restaurant_name + ' has no delivery partner nearby — please assign manually', 'assign_failed']);
+    }
+    res.json({ success: true, delivery_fee, delivery_distance_km, order_id: newOrderId });
   } catch (e) { console.error(e); res.json({ success: false }); }
 });
 app.get('/api/orders', async (req, res) => { try { const r = await q('SELECT * FROM orders ORDER BY created_at DESC'); res.json(r.rows); } catch (e) { res.json([]); } });
@@ -681,6 +756,36 @@ app.post('/api/delivery-boys/update-location', async (req, res) => {
     await q('UPDATE delivery_boys SET lat = $1, lng = $2, location_updated_at = NOW() WHERE id = $3', [lat, lng, dboy.id]);
     res.json({ success: true });
   } catch (e) { res.json({ success: false }); }
+});
+
+// A delivery boy responds to an offered order — accepting locks it in, declining hands it to the next nearest boy
+app.post('/api/delivery-boys/orders/respond', async (req, res) => {
+  const decoded = verifyToken(req);
+  if (!decoded) return res.json({ success: false });
+  try {
+    const { order_id, accept } = req.body;
+    const dr = await q('SELECT * FROM delivery_boys WHERE user_id = $1', [decoded.id]);
+    const dboy = dr.rows[0];
+    if (!dboy) return res.json({ success: false });
+    const or = await q('SELECT * FROM orders WHERE id = $1 AND delivery_boy_id = $2', [order_id, dboy.id]);
+    if (or.rows.length === 0) return res.json({ success: false, message: 'Order not found or already reassigned' });
+
+    if (accept) {
+      await q('UPDATE orders SET delivery_accepted = 1 WHERE id = $1', [order_id]);
+      return res.json({ success: true, accepted: true });
+    }
+
+    // Declined — try the next nearest boy, excluding this one
+    await q('UPDATE orders SET delivery_boy_id = NULL, delivery_accepted = NULL WHERE id = $1', [order_id]);
+    const restR = await q('SELECT * FROM restaurants WHERE id = $1', [or.rows[0].restaurant_id]);
+    const rest = restR.rows[0];
+    let reassigned = null;
+    if (rest) reassigned = await autoAssignDeliveryBoy(order_id, rest.lat, rest.lng, [dboy.id]);
+    if (!reassigned) {
+      await q('INSERT INTO notifications (title, message, type) VALUES ($1,$2,$3)', ['No Delivery Boy Free ⚠️', 'Order #' + order_id + ' declined and no one else is free — please assign manually', 'assign_failed']);
+    }
+    res.json({ success: true, accepted: false, reassigned: reassigned ? reassigned.name : null });
+  } catch (e) { console.error(e); res.json({ success: false }); }
 });
 app.get('/api/delivery-boys/my-shifts', async (req, res) => {
   const decoded = verifyToken(req);
