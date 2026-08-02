@@ -553,6 +553,20 @@ app.post('/api/stays-tiles/update', async (req, res) => {
 app.post('/api/stays-tiles/delete', async (req, res) => { await q('DELETE FROM stays_tiles WHERE id = $1', [req.body.id]); res.json({ success: true }); });
 
 app.get('/api/menu/:restaurant_id', async (req, res) => { try { const r = await q('SELECT * FROM menu_items WHERE restaurant_id = $1 ORDER BY category', [req.params.restaurant_id]); res.json(r.rows); } catch (e) { res.json([]); } });
+// One single query for every dish across every restaurant — used by Home/Stores search & "trending dishes"
+// sections so the app doesn't have to make one network call per restaurant (which was the real cause of the lag).
+app.get('/api/menu-all', async (req, res) => {
+  try {
+    const r = await q(`
+      SELECT m.*, r.name as restaurant_name, r.emoji as restaurant_emoji
+      FROM menu_items m
+      JOIN restaurants r ON m.restaurant_id = r.id
+      WHERE r.active = 1 AND m.is_available = 1
+      ORDER BY m.category
+    `);
+    res.json(r.rows);
+  } catch (e) { console.error(e); res.json([]); }
+});
 app.post('/api/menu/add', async (req, res) => {
   try {
     const { restaurant_id, category, name, price, original_price, portions, description, image, is_veg } = req.body;
