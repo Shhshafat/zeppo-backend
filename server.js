@@ -84,6 +84,7 @@ async function setupDatabase() {
   await q(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS verification_status TEXT DEFAULT 'pending';`);
   await q(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS lat DOUBLE PRECISION;`);
   await q(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS lng DOUBLE PRECISION;`);
+  await q(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS dineout_image TEXT;`);
   await q(`ALTER TABLE delivery_boys ADD COLUMN IF NOT EXISTS lat DOUBLE PRECISION;`);
   await q(`ALTER TABLE delivery_boys ADD COLUMN IF NOT EXISTS lng DOUBLE PRECISION;`);
   await q(`ALTER TABLE delivery_boys ADD COLUMN IF NOT EXISTS location_updated_at TIMESTAMP;`);
@@ -391,7 +392,7 @@ app.post('/api/upload/document', upload.single('image'), (req, res) => { if (!re
 app.get('/api/restaurants', async (req, res) => { try { const r = await q('SELECT * FROM restaurants WHERE active = 1'); res.json(r.rows); } catch (e) { res.json([]); } });
 app.post('/api/restaurants/add', async (req, res) => {
   try {
-    const { name, category, emoji, address, description, image, commission_percent, discount_percent, free_delivery, phone, min_order, delivery_charge, opening_time, closing_time, login_email, login_password, lat, lng } = req.body;
+    const { name, category, emoji, address, description, image, commission_percent, discount_percent, free_delivery, phone, min_order, delivery_charge, opening_time, closing_time, login_email, login_password, lat, lng, dineout_image } = req.body;
     let user_id = null;
     if (login_email && login_password) {
       const exists = await q('SELECT * FROM users WHERE email = $1', [login_email]);
@@ -400,17 +401,17 @@ app.post('/api/restaurants/add', async (req, res) => {
       const result = await q("INSERT INTO users (name, email, phone, password, role, referral_code) VALUES ($1,$2,$3,$4,'restaurant',$5) RETURNING id", [name, login_email, phone || '', hashedPassword, generateReferralCode(name)]);
       user_id = result.rows[0].id;
     }
-    await q('INSERT INTO restaurants (name, category, emoji, address, description, image, commission_percent, discount_percent, free_delivery, phone, min_order, delivery_charge, opening_time, closing_time, user_id, lat, lng) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)',
-      [name, category, emoji || '🍽️', address, description || '', image || '', commission_percent || 15, discount_percent || 0, free_delivery !== undefined ? free_delivery : 1, phone || '', min_order || 0, delivery_charge || 0, opening_time || '09:00', closing_time || '23:00', user_id, lat || null, lng || null]);
+    await q('INSERT INTO restaurants (name, category, emoji, address, description, image, commission_percent, discount_percent, free_delivery, phone, min_order, delivery_charge, opening_time, closing_time, user_id, lat, lng, dineout_image) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)',
+      [name, category, emoji || '🍽️', address, description || '', image || '', commission_percent || 15, discount_percent || 0, free_delivery !== undefined ? free_delivery : 1, phone || '', min_order || 0, delivery_charge || 0, opening_time || '09:00', closing_time || '23:00', user_id, lat || null, lng || null, dineout_image || '']);
     await q('INSERT INTO notifications (title, message, type) VALUES ($1,$2,$3)', ['New Restaurant!', name + ' added', 'restaurant']);
     res.json({ success: true });
   } catch (e) { console.error(e); res.json({ success: false }); }
 });
 app.post('/api/restaurants/update', async (req, res) => {
   try {
-    const { id, name, category, emoji, address, description, image, is_open, commission_percent, discount_percent, free_delivery, phone, min_order, delivery_charge, opening_time, closing_time, lat, lng } = req.body;
-    await q('UPDATE restaurants SET name=$1, category=$2, emoji=$3, address=$4, description=$5, image=$6, is_open=$7, commission_percent=$8, discount_percent=$9, free_delivery=$10, phone=$11, min_order=$12, delivery_charge=$13, opening_time=$14, closing_time=$15, lat=$16, lng=$17 WHERE id=$18',
-      [name, category, emoji, address, description, image, is_open, commission_percent || 15, discount_percent || 0, free_delivery !== undefined ? free_delivery : 1, phone || '', min_order || 0, delivery_charge || 0, opening_time || '09:00', closing_time || '23:00', lat || null, lng || null, id]);
+    const { id, name, category, emoji, address, description, image, is_open, commission_percent, discount_percent, free_delivery, phone, min_order, delivery_charge, opening_time, closing_time, lat, lng, dineout_image } = req.body;
+    await q('UPDATE restaurants SET name=$1, category=$2, emoji=$3, address=$4, description=$5, image=$6, is_open=$7, commission_percent=$8, discount_percent=$9, free_delivery=$10, phone=$11, min_order=$12, delivery_charge=$13, opening_time=$14, closing_time=$15, lat=$16, lng=$17, dineout_image=$18 WHERE id=$19',
+      [name, category, emoji, address, description, image, is_open, commission_percent || 15, discount_percent || 0, free_delivery !== undefined ? free_delivery : 1, phone || '', min_order || 0, delivery_charge || 0, opening_time || '09:00', closing_time || '23:00', lat || null, lng || null, dineout_image || '', id]);
     res.json({ success: true });
   } catch (e) { res.json({ success: false }); }
 });
