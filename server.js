@@ -105,7 +105,8 @@ async function setupDatabase() {
   await q(`CREATE TABLE IF NOT EXISTS menu_items (
     id SERIAL PRIMARY KEY, restaurant_id INTEGER, category TEXT, name TEXT, price INTEGER,
     original_price INTEGER, portions TEXT, is_veg INTEGER DEFAULT 1, description TEXT,
-    image TEXT, is_available INTEGER DEFAULT 1);`);
+    image TEXT, is_available INTEGER DEFAULT 1, is_featured INTEGER DEFAULT 0);`);
+  await q(`ALTER TABLE menu_items ADD COLUMN IF NOT EXISTS is_featured INTEGER DEFAULT 0;`);
   await q(`CREATE TABLE IF NOT EXISTS orders (
     id SERIAL PRIMARY KEY, user_id INTEGER, customer_name TEXT, customer_phone TEXT, customer_address TEXT,
     restaurant_id INTEGER, restaurant_name TEXT, items TEXT, total INTEGER, status TEXT DEFAULT 'pending',
@@ -569,20 +570,21 @@ app.get('/api/menu-all', async (req, res) => {
 });
 app.post('/api/menu/add', async (req, res) => {
   try {
-    const { restaurant_id, category, name, price, original_price, portions, description, image, is_veg } = req.body;
-    await q('INSERT INTO menu_items (restaurant_id, category, name, price, original_price, portions, description, image, is_veg) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)',
-      [restaurant_id, category, name, price, original_price || null, portions ? JSON.stringify(portions) : null, description || '', image || '', is_veg !== undefined ? is_veg : 1]);
+    const { restaurant_id, category, name, price, original_price, portions, description, image, is_veg, is_featured } = req.body;
+    await q('INSERT INTO menu_items (restaurant_id, category, name, price, original_price, portions, description, image, is_veg, is_featured) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)',
+      [restaurant_id, category, name, price, original_price || null, portions ? JSON.stringify(portions) : null, description || '', image || '', is_veg !== undefined ? is_veg : 1, is_featured ? 1 : 0]);
     res.json({ success: true });
   } catch (e) { console.error(e); res.json({ success: false }); }
 });
 app.post('/api/menu/update', async (req, res) => {
   try {
-    const { id, name, price, original_price, portions, description, image, is_available, is_veg } = req.body;
-    await q('UPDATE menu_items SET name=$1, price=$2, original_price=$3, portions=$4, description=$5, image=$6, is_available=$7, is_veg=$8 WHERE id=$9',
-      [name, price, original_price || null, portions ? JSON.stringify(portions) : null, description, image, is_available, is_veg !== undefined ? is_veg : 1, id]);
+    const { id, name, price, original_price, portions, description, image, is_available, is_veg, is_featured } = req.body;
+    await q('UPDATE menu_items SET name=$1, price=$2, original_price=$3, portions=$4, description=$5, image=$6, is_available=$7, is_veg=$8, is_featured=$9 WHERE id=$10',
+      [name, price, original_price || null, portions ? JSON.stringify(portions) : null, description, image, is_available, is_veg !== undefined ? is_veg : 1, is_featured ? 1 : 0, id]);
     res.json({ success: true });
   } catch (e) { res.json({ success: false }); }
 });
+app.post('/api/menu/toggle-featured', async (req, res) => { const { id, is_featured } = req.body; await q('UPDATE menu_items SET is_featured = $1 WHERE id = $2', [is_featured, id]); res.json({ success: true }); });
 app.post('/api/menu/toggle', async (req, res) => { const { id, is_available } = req.body; await q('UPDATE menu_items SET is_available = $1 WHERE id = $2', [is_available, id]); res.json({ success: true }); });
 app.post('/api/menu/delete', async (req, res) => { await q('DELETE FROM menu_items WHERE id = $1', [req.body.id]); res.json({ success: true }); });
 
