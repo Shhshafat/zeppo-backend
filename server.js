@@ -85,6 +85,13 @@ async function setupDatabase() {
   await q(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS lat DOUBLE PRECISION;`);
   await q(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS lng DOUBLE PRECISION;`);
   await q(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS dineout_image TEXT;`);
+  await q(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS bank_account_number TEXT;`);
+  await q(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS bank_ifsc TEXT;`);
+  await q(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS bank_account_holder TEXT;`);
+  await q(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS aadhaar_number TEXT;`);
+  await q(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS pan_number TEXT;`);
+  await q(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS address_proof_document TEXT;`);
+  await q(`ALTER TABLE restaurants ADD COLUMN IF NOT EXISTS id_proof_document TEXT;`);
   await q(`ALTER TABLE delivery_boys ADD COLUMN IF NOT EXISTS lat DOUBLE PRECISION;`);
   await q(`ALTER TABLE delivery_boys ADD COLUMN IF NOT EXISTS lng DOUBLE PRECISION;`);
   await q(`ALTER TABLE delivery_boys ADD COLUMN IF NOT EXISTS location_updated_at TIMESTAMP;`);
@@ -484,9 +491,19 @@ app.post('/api/restaurant/documents', async (req, res) => {
   const decoded = verifyToken(req);
   if (!decoded || decoded.role !== 'restaurant') return res.json({ success: false });
   try {
-    const { owner_name, fssai_license, fssai_document, gst_number } = req.body;
-    await q('UPDATE restaurants SET owner_name=$1, fssai_license=$2, fssai_document=$3, gst_number=$4, verification_status=$5 WHERE user_id=$6',
-      [owner_name || '', fssai_license || '', fssai_document || '', gst_number || '', 'pending', decoded.id]);
+    const {
+      owner_name, fssai_license, fssai_document, gst_number,
+      bank_account_number, bank_ifsc, bank_account_holder,
+      aadhaar_number, pan_number, address_proof_document, id_proof_document,
+    } = req.body;
+    await q(`UPDATE restaurants SET
+        owner_name=$1, fssai_license=$2, fssai_document=$3, gst_number=$4, verification_status=$5,
+        bank_account_number=$6, bank_ifsc=$7, bank_account_holder=$8,
+        aadhaar_number=$9, pan_number=$10, address_proof_document=$11, id_proof_document=$12
+      WHERE user_id=$13`,
+      [owner_name || '', fssai_license || '', fssai_document || '', gst_number || '', 'pending',
+       bank_account_number || '', bank_ifsc || '', bank_account_holder || '',
+       aadhaar_number || '', pan_number || '', address_proof_document || '', id_proof_document || '', decoded.id]);
     res.json({ success: true });
   } catch (e) { console.error(e); res.json({ success: false }); }
 });
@@ -497,29 +514,132 @@ app.get('/api/restaurant/orders', async (req, res) => {
     const rr = await q('SELECT * FROM restaurants WHERE user_id = $1', [decoded.id]);
     const rest = rr.rows[0];
     if (!rest) return res.json([]);
-    const r = await q('SELECT * FROM orders WHERE restaurant_id = $1 ORDER BY created_at DESC', [rest.id]);
+    const r = await q(`
+      SELECT o.*, db.name as delivery_boy_name, db.phone as delivery_boy_phone, db.is_online as delivery_boy_online
+      FROM orders o
+      LEFT JOIN delivery_boys db ON o.delivery_boy_id = db.id
+      WHERE o.restaurant_id = $1
+      ORDER BY o.created_at DESC
+    `, [rest.id]);
     res.json(r.rows);
   } catch (e) { res.json([]); }
 });
+// ===== RESTAURANT'S OWN MENU MANAGEMENT — a restaurant can only ever see/touch its own items =====
+app.get('/api/restaurant/menu', async (req, res) => {
+  const decoded = verifyToken(req);
+  if (!decoded || decoded.role !== 'restaurant') return res.json([]);
+  try {
+    const rr = await q('SELECT * FROM restaurants WHERE user_id = $1', [decoded.id]);
+    const rest = rr.rows[0];
+    if (!rest) return res.json([]);
+    const r = await q('SELECT * FROM menu_items WHERE restaurant_id = $1 ORDER BY category, name', [rest.id]);
+    res.json(r.rows);
+  } catch (e) { res.json([]); }
+});
+app.post('/api/restaurant/menu/add', async (req, res) => {
+  const decoded = verifyToken(req);
+  if (!decoded || decoded.role !== 'restaurant') return res.json({ success: false });
+  try {
+    const rr = await q('SELECT * FROM restaurants WHERE user_id = $1', [decoded.id]);
+    const rest = rr.rows[0];
+    if (!rest) return res.json({ success: false });
+    const { category, name, price, original_price, portions, description, image, is_veg } = req.body;
+    await q('INSERT INTO menu_items (restaurant_id, category, name, price, original_price, portions, description, image, is_veg) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)',
+      [rest.id, category, name, price, original_price || null, portions ? JSON.stringify(portions) : null, description || '', image || '', is_veg !== undefined ? is_veg : 1]);
+    res.json({ success: true });
+  } catch (e) { console.error(e); res.json({ success: false }); }
+});
+app.post('/api/restaurant/menu/update', async (req, res) => {
+  const decoded = verifyToken(req);
+  if (!decoded || decoded.role !== 'restaurant') return res.json({ success: false });
+  try {
+    const rr = await q('SELECT * FROM restaurants WHERE user_id = $1', [decoded.id]);
+    const rest = rr.rows[0];
+    if (!rest) return res.json({ success: false });
+    const { id, name, price, original_price, portions, description, image, is_available, is_veg } = req.body;
+    const owns = await q('SELECT id FROM menu_items WHERE id = $1 AND restaurant_id = $2', [id, rest.id]);
+    if (owns.rows.length === 0) return res.json({ success: false, message: 'Item not found' });
+    await q('UPDATE menu_items SET name=$1, price=$2, original_price=$3, portions=$4, description=$5, image=$6, is_available=$7, is_veg=$8 WHERE id=$9',
+      [name, price, original_price || null, portions ? JSON.stringify(portions) : null, description, image, is_available, is_veg !== undefined ? is_veg : 1, id]);
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false }); }
+});
+app.post('/api/restaurant/menu/toggle', async (req, res) => {
+  const decoded = verifyToken(req);
+  if (!decoded || decoded.role !== 'restaurant') return res.json({ success: false });
+  try {
+    const rr = await q('SELECT * FROM restaurants WHERE user_id = $1', [decoded.id]);
+    const rest = rr.rows[0];
+    if (!rest) return res.json({ success: false });
+    const { id, is_available } = req.body;
+    const owns = await q('SELECT id FROM menu_items WHERE id = $1 AND restaurant_id = $2', [id, rest.id]);
+    if (owns.rows.length === 0) return res.json({ success: false, message: 'Item not found' });
+    await q('UPDATE menu_items SET is_available = $1 WHERE id = $2', [is_available, id]);
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false }); }
+});
+app.post('/api/restaurant/menu/delete', async (req, res) => {
+  const decoded = verifyToken(req);
+  if (!decoded || decoded.role !== 'restaurant') return res.json({ success: false });
+  try {
+    const rr = await q('SELECT * FROM restaurants WHERE user_id = $1', [decoded.id]);
+    const rest = rr.rows[0];
+    if (!rest) return res.json({ success: false });
+    const { id } = req.body;
+    const owns = await q('SELECT id FROM menu_items WHERE id = $1 AND restaurant_id = $2', [id, rest.id]);
+    if (owns.rows.length === 0) return res.json({ success: false, message: 'Item not found' });
+    await q('DELETE FROM menu_items WHERE id = $1', [id]);
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false }); }
+});
+
+// ===== RESTAURANT'S OWN REVIEWS =====
+app.get('/api/restaurant/reviews', async (req, res) => {
+  const decoded = verifyToken(req);
+  if (!decoded || decoded.role !== 'restaurant') return res.json([]);
+  try {
+    const rr = await q('SELECT * FROM restaurants WHERE user_id = $1', [decoded.id]);
+    const rest = rr.rows[0];
+    if (!rest) return res.json([]);
+    const r = await q(`
+      SELECT rt.*, u.name as customer_name
+      FROM ratings rt
+      LEFT JOIN users u ON rt.user_id = u.id
+      WHERE rt.restaurant_id = $1
+      ORDER BY rt.created_at DESC
+    `, [rest.id]);
+    res.json(r.rows);
+  } catch (e) { res.json([]); }
+});
+
 app.post('/api/restaurant/orders/status', async (req, res) => {
   const decoded = verifyToken(req);
   if (!decoded || decoded.role !== 'restaurant') return res.json({ success: false });
   try {
-    const { id, status } = req.body;
-    // A restaurant can only move an order forward through its own prep stages —
-    // it can never touch delivery assignment or mark something delivered; that stays with admin.
-    if (!['confirmed', 'preparing'].includes(status)) return res.json({ success: false, message: 'Not allowed' });
+    const { id, status, reason } = req.body;
+    // A restaurant can move an order forward through its own prep stages, or reject a still-pending order.
+    // It can never touch delivery assignment or mark something delivered; that stays with admin.
+    if (!['confirmed', 'preparing', 'cancelled'].includes(status)) return res.json({ success: false, message: 'Not allowed' });
     const rr = await q('SELECT * FROM restaurants WHERE user_id = $1', [decoded.id]);
     const rest = rr.rows[0];
     if (!rest) return res.json({ success: false });
     const or = await q('SELECT * FROM orders WHERE id = $1 AND restaurant_id = $2', [id, rest.id]);
     if (or.rows.length === 0) return res.json({ success: false, message: 'Order not found' });
+    const currentOrder = or.rows[0];
     // Cooking shouldn't start until someone has actually accepted the delivery —
     // otherwise food gets made with nobody free to pick it up.
-    if (status === 'confirmed' && or.rows[0].delivery_accepted !== 1) {
+    if (status === 'confirmed' && currentOrder.delivery_accepted !== 1) {
       return res.json({ success: false, message: 'Waiting for a delivery partner to accept this order first' });
     }
+    // A restaurant can only reject an order before they've already confirmed it — once cooking starts, use support instead.
+    if (status === 'cancelled' && currentOrder.status !== 'pending') {
+      return res.json({ success: false, message: 'Only a still-pending order can be rejected' });
+    }
     await q('UPDATE orders SET status = $1 WHERE id = $2', [status, id]);
+    if (status === 'cancelled') {
+      await q('INSERT INTO notifications (title, message, type) VALUES ($1,$2,$3)',
+        ['Order Rejected', rest.name + ' rejected order #' + id + (reason ? ' — ' + reason : ''), 'order_rejected']);
+    }
     res.json({ success: true });
   } catch (e) { res.json({ success: false }); }
 });
