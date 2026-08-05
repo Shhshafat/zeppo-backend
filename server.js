@@ -148,6 +148,7 @@ async function setupDatabase() {
   await q(`CREATE TABLE IF NOT EXISTS table_bookings (
     id SERIAL PRIMARY KEY, restaurant_id INTEGER, restaurant_name TEXT, customer_name TEXT, customer_phone TEXT,
     booking_date TEXT, booking_time TEXT, guests INTEGER DEFAULT 2, status TEXT DEFAULT 'pending', created_at TIMESTAMP DEFAULT NOW());`);
+  await q(`ALTER TABLE table_bookings ADD COLUMN IF NOT EXISTS offer_selected TEXT;`);
   await q(`CREATE TABLE IF NOT EXISTS referrals (
     id SERIAL PRIMARY KEY, referrer_user_id INTEGER, referred_user_id INTEGER, reward_amount INTEGER DEFAULT 50, created_at TIMESTAMP DEFAULT NOW());`);
   await q(`CREATE TABLE IF NOT EXISTS addresses (
@@ -391,6 +392,14 @@ app.post('/api/upload/tile', upload.single('image'), (req, res) => { if (!req.fi
 app.post('/api/upload/document', upload.single('image'), (req, res) => { if (!req.file) return res.json({ success: false }); res.json({ success: true, url: req.file.path }); });
 
 app.get('/api/restaurants', async (req, res) => { try { const r = await q('SELECT * FROM restaurants WHERE active = 1'); res.json(r.rows); } catch (e) { res.json([]); } });
+app.get('/api/restaurants/:id', async (req, res) => {
+  try {
+    const r = await q('SELECT * FROM restaurants WHERE id = $1', [req.params.id]);
+    if (r.rows.length === 0) return res.json({ error: 'not_found' });
+    const ratingsRes = await q('SELECT COUNT(*) as count FROM ratings WHERE restaurant_id = $1', [req.params.id]);
+    res.json({ ...r.rows[0], ratings_count: parseInt(ratingsRes.rows[0]?.count || 0) });
+  } catch (e) { console.error(e); res.json({ error: 'server_error' }); }
+});
 app.post('/api/restaurants/add', async (req, res) => {
   try {
     const { name, category, emoji, address, description, image, commission_percent, discount_percent, free_delivery, phone, min_order, delivery_charge, opening_time, closing_time, login_email, login_password, lat, lng, dineout_image } = req.body;
@@ -946,9 +955,9 @@ app.post('/api/stays/bookings/status', async (req, res) => { const { id, status 
 // ===== TABLE BOOKINGS (Dineout) =====
 app.post('/api/tables/book', async (req, res) => {
   try {
-    const { restaurant_id, restaurant_name, customer_name, customer_phone, booking_date, booking_time, guests } = req.body;
-    await q('INSERT INTO table_bookings (restaurant_id, restaurant_name, customer_name, customer_phone, booking_date, booking_time, guests) VALUES ($1,$2,$3,$4,$5,$6,$7)',
-      [restaurant_id, restaurant_name, customer_name, customer_phone, booking_date, booking_time, guests || 2]);
+    const { restaurant_id, restaurant_name, customer_name, customer_phone, booking_date, booking_time, guests, offer_selected } = req.body;
+    await q('INSERT INTO table_bookings (restaurant_id, restaurant_name, customer_name, customer_phone, booking_date, booking_time, guests, offer_selected) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',
+      [restaurant_id, restaurant_name, customer_name, customer_phone, booking_date, booking_time, guests || 2, offer_selected || 'standard']);
     await q('INSERT INTO notifications (title, message, type) VALUES ($1,$2,$3)', ['New Table Booking! 🍽️', customer_name + ' wants a table at ' + restaurant_name + ' on ' + booking_date + ' ' + booking_time, 'table_booking']);
     res.json({ success: true });
   } catch (e) { console.error(e); res.json({ success: false }); }
