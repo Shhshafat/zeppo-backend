@@ -122,10 +122,26 @@ async function setupDatabase() {
   await q(`CREATE TABLE IF NOT EXISTS applications (
     id SERIAL PRIMARY KEY, full_name TEXT, father_name TEXT, phone TEXT, aadhar TEXT, dob TEXT,
     address TEXT, has_bike TEXT, bike_number TEXT, status TEXT DEFAULT 'pending', created_at TIMESTAMP DEFAULT NOW());`);
+  await q(`ALTER TABLE applications ADD COLUMN IF NOT EXISTS id_proof_document TEXT;`);
+  await q(`ALTER TABLE applications ADD COLUMN IF NOT EXISTS license_document TEXT;`);
+  await q(`ALTER TABLE applications ADD COLUMN IF NOT EXISTS delivery_boy_id INTEGER;`);
+  await q(`ALTER TABLE applications ADD COLUMN IF NOT EXISTS bank_account_number TEXT;`);
+  await q(`ALTER TABLE applications ADD COLUMN IF NOT EXISTS bank_ifsc TEXT;`);
+  await q(`ALTER TABLE applications ADD COLUMN IF NOT EXISTS bank_account_holder TEXT;`);
+
+  await q(`CREATE TABLE IF NOT EXISTS restaurant_applications (
+    id SERIAL PRIMARY KEY, restaurant_name TEXT, owner_name TEXT, category TEXT, address TEXT, phone TEXT,
+    fssai_license TEXT, fssai_document TEXT, gst_number TEXT,
+    bank_account_number TEXT, bank_ifsc TEXT, bank_account_holder TEXT,
+    id_proof_document TEXT, address_proof_document TEXT,
+    status TEXT DEFAULT 'pending', restaurant_id INTEGER, created_at TIMESTAMP DEFAULT NOW());`);
   await q(`CREATE TABLE IF NOT EXISTS delivery_boys (
     id SERIAL PRIMARY KEY, user_id INTEGER, name TEXT, phone TEXT, salary_per_delivery INTEGER DEFAULT 50,
     total_deliveries INTEGER DEFAULT 0, total_earned INTEGER DEFAULT 0, advance_taken INTEGER DEFAULT 0,
     paid_out INTEGER DEFAULT 0, is_online INTEGER DEFAULT 0, is_active INTEGER DEFAULT 1, created_at TIMESTAMP DEFAULT NOW());`);
+  await q(`ALTER TABLE delivery_boys ADD COLUMN IF NOT EXISTS bank_account_number TEXT;`);
+  await q(`ALTER TABLE delivery_boys ADD COLUMN IF NOT EXISTS bank_ifsc TEXT;`);
+  await q(`ALTER TABLE delivery_boys ADD COLUMN IF NOT EXISTS bank_account_holder TEXT;`);
   await q(`CREATE TABLE IF NOT EXISTS delivery_advances (
     id SERIAL PRIMARY KEY, delivery_boy_id INTEGER, amount INTEGER, note TEXT, created_at TIMESTAMP DEFAULT NOW());`);
   await q(`CREATE TABLE IF NOT EXISTS delivery_shifts (
@@ -149,6 +165,7 @@ async function setupDatabase() {
     id SERIAL PRIMARY KEY, name TEXT, type TEXT DEFAULT 'Hotel', price_per_night INTEGER, address TEXT,
     phone TEXT, amenities TEXT, rating TEXT DEFAULT '4.5', images TEXT, description TEXT,
     is_active INTEGER DEFAULT 1, created_at TIMESTAMP DEFAULT NOW());`);
+  await q(`ALTER TABLE stays ADD COLUMN IF NOT EXISTS video TEXT;`);
   await q(`CREATE TABLE IF NOT EXISTS stay_bookings (
     id SERIAL PRIMARY KEY, stay_id INTEGER, stay_name TEXT, customer_name TEXT, customer_phone TEXT,
     check_in TEXT, check_out TEXT, guests INTEGER DEFAULT 1, status TEXT DEFAULT 'pending', created_at TIMESTAMP DEFAULT NOW());`);
@@ -434,6 +451,15 @@ app.post('/api/restaurants/update', async (req, res) => {
 });
 app.post('/api/restaurants/delete', async (req, res) => { await q('UPDATE restaurants SET active = 0 WHERE id = $1', [req.body.id]); res.json({ success: true }); });
 app.post('/api/restaurants/toggle', async (req, res) => { const { id, is_open } = req.body; await q('UPDATE restaurants SET is_open = $1 WHERE id = $2', [is_open, id]); res.json({ success: true }); });
+app.post('/api/restaurant/toggle-open', async (req, res) => {
+  const decoded = verifyToken(req);
+  if (!decoded || decoded.role !== 'restaurant') return res.json({ success: false });
+  try {
+    const { is_open } = req.body;
+    await q('UPDATE restaurants SET is_open = $1 WHERE user_id = $2', [is_open, decoded.id]);
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false }); }
+});
 app.post('/api/restaurants/verify', async (req, res) => {
   try {
     const { id, verification_status } = req.body;
@@ -757,6 +783,20 @@ app.post('/api/order', strictLimiter, async (req, res) => {
 
     const restR = await q('SELECT * FROM restaurants WHERE id = $1', [restaurant_id]);
     const rest = restR.rows[0];
+    if (!rest || rest.active === 0) return res.json({ success: false, message: 'This restaurant is no longer available.' });
+    if (rest.is_open === 0) return res.json({ success: false, message: rest.name + ' is currently closed and not accepting orders right now.' });
+
+    // Catch items that went out of stock between browsing and checkout — better to say so now
+    // than to have the restaurant reject the whole order later.
+    const menuR = await q('SELECT name, is_available FROM menu_items WHERE restaurant_id = $1', [restaurant_id]);
+    const unavailable = (items || [])
+      .map((it) => menuR.rows.find((m) => m.name === it.name))
+      .filter((m) => m && m.is_available === 0)
+      .map((m) => m.name);
+    if (unavailable.length > 0) {
+      return res.json({ success: false, message: 'These items just went out of stock: ' + unavailable.join(', ') + '. Please remove them from your cart.' });
+    }
+
     const { delivery_distance_km, delivery_fee } = await computeDeliveryFee(rest, customer_lat, customer_lng);
 
     const insertRes = await q('INSERT INTO orders (user_id, customer_name, customer_phone, customer_address, restaurant_id, restaurant_name, items, total, payment_method, customer_lat, customer_lng, delivery_distance_km, delivery_fee) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING id',
@@ -809,7 +849,7 @@ app.get('/api/delivery-orders', async (req, res) => {
     const dr = await q('SELECT * FROM delivery_boys WHERE user_id = $1', [decoded.id]);
     const dboy = dr.rows[0];
     if (!dboy) return res.json([]);
-    const r = await q("SELECT * FROM orders WHERE delivery_boy_id = $1 AND status IN ('confirmed','preparing','on_the_way','delivered') ORDER BY created_at DESC", [dboy.id]);
+    const r = await q("SELECT * FROM orders WHERE delivery_boy_id = $1 AND status IN ('pending','confirmed','preparing','on_the_way','delivered') ORDER BY created_at DESC", [dboy.id]);
     res.json(r.rows);
   } catch (e) { res.json([]); }
 });
@@ -1048,15 +1088,15 @@ app.post('/api/settings', async (req, res) => {
 app.get('/api/stays', async (req, res) => { try { const r = await q('SELECT * FROM stays WHERE is_active = 1'); res.json(r.rows); } catch (e) { res.json([]); } });
 app.post('/api/stays/add', async (req, res) => {
   try {
-    const { name, type, price_per_night, address, phone, amenities, images, description } = req.body;
-    await q('INSERT INTO stays (name, type, price_per_night, address, phone, amenities, images, description) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [name, type || 'Hotel', price_per_night, address, phone || '', amenities || '', JSON.stringify(images || []), description || '']);
+    const { name, type, price_per_night, address, phone, amenities, images, description, video } = req.body;
+    await q('INSERT INTO stays (name, type, price_per_night, address, phone, amenities, images, description, video) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)', [name, type || 'Hotel', price_per_night, address, phone || '', amenities || '', JSON.stringify(images || []), description || '', video || '']);
     res.json({ success: true });
   } catch (e) { console.error(e); res.json({ success: false }); }
 });
 app.post('/api/stays/update', async (req, res) => {
   try {
-    const { id, name, type, price_per_night, address, phone, amenities, images, description } = req.body;
-    await q('UPDATE stays SET name=$1, type=$2, price_per_night=$3, address=$4, phone=$5, amenities=$6, images=$7, description=$8 WHERE id=$9', [name, type, price_per_night, address, phone || '', amenities || '', JSON.stringify(images || []), description || '', id]);
+    const { id, name, type, price_per_night, address, phone, amenities, images, description, video } = req.body;
+    await q('UPDATE stays SET name=$1, type=$2, price_per_night=$3, address=$4, phone=$5, amenities=$6, images=$7, description=$8, video=$9 WHERE id=$10', [name, type, price_per_night, address, phone || '', amenities || '', JSON.stringify(images || []), description || '', video || '', id]);
     res.json({ success: true });
   } catch (e) { res.json({ success: false }); }
 });
@@ -1108,14 +1148,80 @@ app.get('/api/users', async (req, res) => { try { const r = await q('SELECT id, 
 
 app.post('/api/apply', async (req, res) => {
   try {
-    const { full_name, father_name, phone, aadhar, dob, address, has_bike, bike_number } = req.body;
-    await q('INSERT INTO applications (full_name, father_name, phone, aadhar, dob, address, has_bike, bike_number) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)', [full_name, father_name, phone, aadhar, dob, address, has_bike, bike_number]);
+    const { full_name, father_name, phone, aadhar, dob, address, has_bike, bike_number, id_proof_document, license_document, bank_account_number, bank_ifsc, bank_account_holder } = req.body;
+    await q('INSERT INTO applications (full_name, father_name, phone, aadhar, dob, address, has_bike, bike_number, id_proof_document, license_document, bank_account_number, bank_ifsc, bank_account_holder) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)',
+      [full_name, father_name, phone, aadhar, dob, address, has_bike, bike_number, id_proof_document || '', license_document || '', bank_account_number || '', bank_ifsc || '', bank_account_holder || '']);
     await q('INSERT INTO notifications (title, message, type) VALUES ($1,$2,$3)', ['New Application!', full_name + ' applied as delivery partner', 'application']);
     res.json({ success: true });
   } catch (e) { console.error(e); res.json({ success: false }); }
 });
 app.get('/api/applications', async (req, res) => { try { const r = await q('SELECT * FROM applications ORDER BY created_at DESC'); res.json(r.rows); } catch (e) { res.json([]); } });
 app.post('/api/application/status', async (req, res) => { const { id, status } = req.body; await q('UPDATE applications SET status = $1 WHERE id = $2', [status, id]); res.json({ success: true }); });
+
+// Approving an application is the only way a delivery account gets created — this is what actually
+// issues login credentials, so the applicant's uploaded documents get a real human look first.
+app.post('/api/application/approve', async (req, res) => {
+  try {
+    const { id, email, password, salary_per_delivery } = req.body;
+    if (!email || !password) return res.json({ success: false, message: 'Email and password are required' });
+    const appRes = await q('SELECT * FROM applications WHERE id = $1', [id]);
+    const app_ = appRes.rows[0];
+    if (!app_) return res.json({ success: false, message: 'Application not found' });
+    const exists = await q('SELECT * FROM users WHERE email = $1', [email]);
+    if (exists.rows.length > 0) return res.json({ success: false, message: 'Email already used!' });
+    const hashedPassword = bcrypt.hashSync(password, 10);
+    const userResult = await q("INSERT INTO users (name, email, phone, password, role, referral_code) VALUES ($1,$2,$3,$4,'delivery',$5) RETURNING id",
+      [app_.full_name, email, app_.phone, hashedPassword, generateReferralCode(app_.full_name)]);
+    const dbResult = await q('INSERT INTO delivery_boys (user_id, name, phone, salary_per_delivery, bank_account_number, bank_ifsc, bank_account_holder) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id',
+      [userResult.rows[0].id, app_.full_name, app_.phone, salary_per_delivery || 50, app_.bank_account_number || '', app_.bank_ifsc || '', app_.bank_account_holder || '']);
+    await q("UPDATE applications SET status = 'approved', delivery_boy_id = $1 WHERE id = $2", [dbResult.rows[0].id, id]);
+    res.json({ success: true });
+  } catch (e) { console.error(e); res.json({ success: false }); }
+});
+
+// ===== RESTAURANT APPLICATIONS — same gated pattern: apply with documents, admin reviews, approval creates the account =====
+app.post('/api/restaurant-apply', async (req, res) => {
+  try {
+    const {
+      restaurant_name, owner_name, category, address, phone,
+      fssai_license, fssai_document, gst_number,
+      bank_account_number, bank_ifsc, bank_account_holder,
+      id_proof_document, address_proof_document,
+    } = req.body;
+    if (!restaurant_name || !owner_name || !address || !phone || !fssai_license) return res.json({ success: false, message: 'Please fill all required fields' });
+    await q(`INSERT INTO restaurant_applications
+      (restaurant_name, owner_name, category, address, phone, fssai_license, fssai_document, gst_number, bank_account_number, bank_ifsc, bank_account_holder, id_proof_document, address_proof_document)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+      [restaurant_name, owner_name, category || '', address, phone, fssai_license, fssai_document || '', gst_number || '', bank_account_number || '', bank_ifsc || '', bank_account_holder || '', id_proof_document || '', address_proof_document || '']);
+    await q('INSERT INTO notifications (title, message, type) VALUES ($1,$2,$3)', ['New Restaurant Application! 🍽️', restaurant_name + ' applied to join ZEPPO', 'restaurant_application']);
+    res.json({ success: true });
+  } catch (e) { console.error(e); res.json({ success: false }); }
+});
+app.get('/api/restaurant-applications', async (req, res) => { try { const r = await q('SELECT * FROM restaurant_applications ORDER BY created_at DESC'); res.json(r.rows); } catch (e) { res.json([]); } });
+app.post('/api/restaurant-applications/status', async (req, res) => { const { id, status } = req.body; await q('UPDATE restaurant_applications SET status = $1 WHERE id = $2', [status, id]); res.json({ success: true }); });
+app.post('/api/restaurant-applications/approve', async (req, res) => {
+  try {
+    const { id, email, password, commission_percent } = req.body;
+    if (!email || !password) return res.json({ success: false, message: 'Email and password are required' });
+    const appRes = await q('SELECT * FROM restaurant_applications WHERE id = $1', [id]);
+    const app_ = appRes.rows[0];
+    if (!app_) return res.json({ success: false, message: 'Application not found' });
+    const exists = await q('SELECT * FROM users WHERE email = $1', [email]);
+    if (exists.rows.length > 0) return res.json({ success: false, message: 'Email already used!' });
+    const hashedPassword = bcrypt.hashSync(password, 10);
+    const userResult = await q("INSERT INTO users (name, email, phone, password, role, referral_code) VALUES ($1,$2,$3,$4,'restaurant',$5) RETURNING id",
+      [app_.owner_name, email, app_.phone, hashedPassword, generateReferralCode(app_.owner_name)]);
+    const restResult = await q(`INSERT INTO restaurants
+      (user_id, name, category, address, phone, commission_percent, owner_name, fssai_license, fssai_document, gst_number,
+       bank_account_number, bank_ifsc, bank_account_holder, id_proof_document, verification_status, active, opening_time, closing_time)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'verified',1,'09:00','23:00') RETURNING id`,
+      [userResult.rows[0].id, app_.restaurant_name, app_.category, app_.address, app_.phone, commission_percent || 15,
+       app_.owner_name, app_.fssai_license, app_.fssai_document, app_.gst_number,
+       app_.bank_account_number, app_.bank_ifsc, app_.bank_account_holder, app_.id_proof_document]);
+    await q("UPDATE restaurant_applications SET status = 'approved', restaurant_id = $1 WHERE id = $2", [restResult.rows[0].id, id]);
+    res.json({ success: true });
+  } catch (e) { console.error(e); res.json({ success: false }); }
+});
 
 app.get('/api/analytics', async (req, res) => {
   try {
