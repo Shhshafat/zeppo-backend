@@ -258,6 +258,28 @@ function generateReferralCode(name) {
   return base + rand;
 }
 
+// ===== SHARED VALIDATION — the one place every endpoint checks real-looking data,
+// so nobody can slip "asdasd" into an email field or "123" into a phone field. =====
+const isValidEmail = (v) => typeof v === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(v.trim());
+const isValidPhone = (v) => typeof v === 'string' && /^[6-9]\d{9}$/.test(v.trim());
+const isValidName = (v) => typeof v === 'string' && v.trim().length >= 2 && /^[a-zA-Z][a-zA-Z\s.'-]*$/.test(v.trim());
+const isValidAadhaar = (v) => typeof v === 'string' && /^\d{12}$/.test(v.replace(/\s/g, ''));
+const isValidPAN = (v) => typeof v === 'string' && /^[A-Z]{5}\d{4}[A-Z]$/.test(v.trim().toUpperCase());
+const isValidIFSC = (v) => typeof v === 'string' && /^[A-Z]{4}0[A-Z0-9]{6}$/.test(v.trim().toUpperCase());
+const isValidBankAccount = (v) => typeof v === 'string' && /^\d{9,18}$/.test(v.trim());
+const isValidFSSAI = (v) => typeof v === 'string' && /^\d{14}$/.test(v.trim());
+const isValidAddress = (v) => typeof v === 'string' && v.trim().length >= 8 && /[a-zA-Z]/.test(v);
+const isNotJunk = (v) => typeof v === 'string' && v.trim().length > 0 && !/^(.)\1*$/.test(v.trim()) && !/^(test|asdf|abc|xxx|123|na|none)$/i.test(v.trim());
+
+// Runs a set of {field, value, check, message} rules and returns the first failure, or null if all pass —
+// keeps every endpoint's validation block short and consistent instead of repeating if-chains everywhere.
+function validateFields(rules) {
+  for (const rule of rules) {
+    if (!rule.check(rule.value)) return rule.message;
+  }
+  return null;
+}
+
 // Straight-line distance in km between two lat/lng points — good enough for a small-town
 // delivery radius like Kupwara, and needs no external maps API or extra cost.
 function haversineKm(lat1, lng1, lat2, lng2) {
@@ -308,6 +330,13 @@ app.post('/api/register', strictLimiter, async (req, res) => {
   try {
     const { name, email, phone, password, referral_code } = req.body;
     if (!name || !email || !phone || !password) return res.json({ success: false, message: 'All fields required!' });
+    const err = validateFields([
+      { value: name, check: isValidName, message: 'Please enter a valid full name (letters only).' },
+      { value: email, check: isValidEmail, message: 'Please enter a valid email address.' },
+      { value: phone, check: isValidPhone, message: 'Please enter a valid 10-digit phone number.' },
+      { value: password, check: (v) => typeof v === 'string' && v.length >= 6, message: 'Password must be at least 6 characters.' },
+    ]);
+    if (err) return res.json({ success: false, message: err });
     const exists = await q('SELECT * FROM users WHERE email = $1', [email]);
     if (exists.rows.length > 0) return res.json({ success: false, message: 'Email already registered!' });
     const hashedPassword = bcrypt.hashSync(password, 10);
@@ -462,6 +491,13 @@ app.get('/api/restaurants/:id', async (req, res) => {
 app.post('/api/restaurants/add', async (req, res) => {
   try {
     const { name, category, emoji, address, description, image, commission_percent, discount_percent, free_delivery, phone, min_order, delivery_charge, opening_time, closing_time, login_email, login_password, lat, lng, dineout_image } = req.body;
+    const err = validateFields([
+      { value: name, check: isNotJunk, message: 'Please enter a real restaurant name.' },
+      { value: address, check: isValidAddress, message: 'Please enter the full address.' },
+    ]);
+    if (err) return res.json({ success: false, message: err });
+    if (phone && !isValidPhone(phone)) return res.json({ success: false, message: 'Please enter a valid 10-digit phone number.' });
+    if (login_email && !isValidEmail(login_email)) return res.json({ success: false, message: 'Please enter a valid login email.' });
     let user_id = null;
     if (login_email && login_password) {
       const exists = await q('SELECT * FROM users WHERE email = $1', [login_email]);
@@ -827,6 +863,14 @@ app.post('/api/order', strictLimiter, async (req, res) => {
     const decoded = verifyToken(req);
     const user_id = decoded ? decoded.id : null;
 
+    const err = validateFields([
+      { value: customer_name, check: isValidName, message: 'Please enter a valid name for this order.' },
+      { value: customer_phone, check: isValidPhone, message: 'Please enter a valid 10-digit phone number.' },
+      { value: customer_address, check: isValidAddress, message: 'Please enter a complete delivery address.' },
+    ]);
+    if (err) return res.json({ success: false, message: err });
+    if (!items || items.length === 0) return res.json({ success: false, message: 'Your cart is empty.' });
+
     const restR = await q('SELECT * FROM restaurants WHERE id = $1', [restaurant_id]);
     const rest = restR.rows[0];
     if (!rest || rest.active === 0) return res.json({ success: false, message: 'This restaurant is no longer available.' });
@@ -1161,6 +1205,13 @@ app.get('/api/stays', async (req, res) => { try { const r = await q('SELECT * FR
 app.post('/api/stays/add', async (req, res) => {
   try {
     const { name, type, price_per_night, address, phone, amenities, images, description, video } = req.body;
+    const err = validateFields([
+      { value: name, check: isNotJunk, message: 'Please enter a real stay/hotel name.' },
+      { value: address, check: isValidAddress, message: 'Please enter the full address.' },
+    ]);
+    if (err) return res.json({ success: false, message: err });
+    if (phone && !isValidPhone(phone)) return res.json({ success: false, message: 'Please enter a valid 10-digit phone number.' });
+    if (!price_per_night || price_per_night <= 0) return res.json({ success: false, message: 'Please enter a valid price per night.' });
     await q('INSERT INTO stays (name, type, price_per_night, address, phone, amenities, images, description, video) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)', [name, type || 'Hotel', price_per_night, address, phone || '', amenities || '', JSON.stringify(images || []), description || '', video || '']);
     res.json({ success: true });
   } catch (e) { console.error(e); res.json({ success: false }); }
@@ -1176,6 +1227,12 @@ app.post('/api/stays/delete', async (req, res) => { await q('UPDATE stays SET is
 app.post('/api/stays/book', async (req, res) => {
   try {
     const { stay_id, stay_name, customer_name, customer_phone, check_in, check_out, guests } = req.body;
+    const err = validateFields([
+      { value: customer_name, check: isValidName, message: 'Please enter a valid name.' },
+      { value: customer_phone, check: isValidPhone, message: 'Please enter a valid 10-digit phone number.' },
+    ]);
+    if (err) return res.json({ success: false, message: err });
+    if (!check_in || !check_out) return res.json({ success: false, message: 'Please select check-in and check-out dates.' });
     await q('INSERT INTO stay_bookings (stay_id, stay_name, customer_name, customer_phone, check_in, check_out, guests) VALUES ($1,$2,$3,$4,$5,$6,$7)', [stay_id, stay_name, customer_name, customer_phone, check_in, check_out, guests || 1]);
     await q('INSERT INTO notifications (title, message, type) VALUES ($1,$2,$3)', ['New Stay Booking Request!', customer_name + ' wants to book ' + stay_name + ' (' + check_in + ' to ' + check_out + ')', 'booking']);
     res.json({ success: true });
@@ -1188,6 +1245,12 @@ app.post('/api/stays/bookings/status', async (req, res) => { const { id, status 
 app.post('/api/tables/book', async (req, res) => {
   try {
     const { restaurant_id, restaurant_name, customer_name, customer_phone, booking_date, booking_time, guests, offer_selected } = req.body;
+    const err = validateFields([
+      { value: customer_name, check: isValidName, message: 'Please enter a valid name.' },
+      { value: customer_phone, check: isValidPhone, message: 'Please enter a valid 10-digit phone number.' },
+    ]);
+    if (err) return res.json({ success: false, message: err });
+    if (!booking_date || !booking_time) return res.json({ success: false, message: 'Please select a date and time.' });
     await q('INSERT INTO table_bookings (restaurant_id, restaurant_name, customer_name, customer_phone, booking_date, booking_time, guests, offer_selected) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',
       [restaurant_id, restaurant_name, customer_name, customer_phone, booking_date, booking_time, guests || 2, offer_selected || 'standard']);
     await q('INSERT INTO notifications (title, message, type) VALUES ($1,$2,$3)', ['New Table Booking! 🍽️', customer_name + ' wants a table at ' + restaurant_name + ' on ' + booking_date + ' ' + booking_time, 'table_booking']);
@@ -1221,8 +1284,21 @@ app.get('/api/users', async (req, res) => { try { const r = await q('SELECT id, 
 app.post('/api/apply', async (req, res) => {
   try {
     const { full_name, father_name, phone, aadhar, dob, address, has_bike, bike_number, id_proof_document, license_document, bank_account_number, bank_ifsc, bank_account_holder } = req.body;
+    const err = validateFields([
+      { value: full_name, check: isValidName, message: 'Please enter a valid full name.' },
+      { value: father_name, check: isValidName, message: "Please enter a valid father's name." },
+      { value: phone, check: isValidPhone, message: 'Please enter a valid 10-digit phone number.' },
+      { value: aadhar, check: isValidAadhaar, message: 'Please enter a valid 12-digit Aadhaar number.' },
+      { value: address, check: isValidAddress, message: 'Please enter your full address.' },
+      { value: bank_account_holder, check: isValidName, message: 'Please enter a valid account holder name.' },
+      { value: bank_account_number, check: isValidBankAccount, message: 'Please enter a valid bank account number.' },
+      { value: bank_ifsc, check: isValidIFSC, message: 'Please enter a valid IFSC code (e.g. SBIN0001234).' },
+    ]);
+    if (err) return res.json({ success: false, message: err });
+    if (has_bike === 'yes' && !bike_number) return res.json({ success: false, message: 'Please enter your bike number.' });
+
     await q('INSERT INTO applications (full_name, father_name, phone, aadhar, dob, address, has_bike, bike_number, id_proof_document, license_document, bank_account_number, bank_ifsc, bank_account_holder) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)',
-      [full_name, father_name, phone, aadhar, dob, address, has_bike, bike_number, id_proof_document || '', license_document || '', bank_account_number || '', bank_ifsc || '', bank_account_holder || '']);
+      [full_name, father_name, phone, aadhar, dob, address, has_bike, bike_number, id_proof_document || '', license_document || '', bank_account_number || '', bank_ifsc.toUpperCase(), bank_account_holder]);
     await q('INSERT INTO notifications (title, message, type) VALUES ($1,$2,$3)', ['New Application!', full_name + ' applied as delivery partner', 'application']);
     res.json({ success: true });
   } catch (e) { console.error(e); res.json({ success: false }); }
@@ -1261,10 +1337,24 @@ app.post('/api/restaurant-apply', async (req, res) => {
       id_proof_document, address_proof_document,
     } = req.body;
     if (!restaurant_name || !owner_name || !address || !phone || !fssai_license) return res.json({ success: false, message: 'Please fill all required fields' });
+    const err = validateFields([
+      { value: restaurant_name, check: isNotJunk, message: 'Please enter a real restaurant name.' },
+      { value: owner_name, check: isValidName, message: "Please enter a valid owner's name." },
+      { value: address, check: isValidAddress, message: 'Please enter the full restaurant address.' },
+      { value: phone, check: isValidPhone, message: 'Please enter a valid 10-digit phone number.' },
+      { value: fssai_license, check: isValidFSSAI, message: 'Please enter a valid 14-digit FSSAI license number.' },
+      { value: bank_account_holder, check: isValidName, message: 'Please enter a valid account holder name.' },
+      { value: bank_account_number, check: isValidBankAccount, message: 'Please enter a valid bank account number.' },
+      { value: bank_ifsc, check: isValidIFSC, message: 'Please enter a valid IFSC code (e.g. SBIN0001234).' },
+    ]);
+    if (err) return res.json({ success: false, message: err });
+    if (gst_number && !/^\d{2}[A-Z]{5}\d{4}[A-Z]\d[Z][A-Z\d]$/.test(gst_number.toUpperCase())) {
+      return res.json({ success: false, message: 'GST number format looks incorrect — leave it blank if you don\'t have one yet.' });
+    }
     await q(`INSERT INTO restaurant_applications
       (restaurant_name, owner_name, category, address, phone, fssai_license, fssai_document, gst_number, bank_account_number, bank_ifsc, bank_account_holder, id_proof_document, address_proof_document)
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
-      [restaurant_name, owner_name, category || '', address, phone, fssai_license, fssai_document || '', gst_number || '', bank_account_number || '', bank_ifsc || '', bank_account_holder || '', id_proof_document || '', address_proof_document || '']);
+      [restaurant_name, owner_name, category || '', address, phone, fssai_license, fssai_document || '', gst_number ? gst_number.toUpperCase() : '', bank_account_number, bank_ifsc.toUpperCase(), bank_account_holder, id_proof_document || '', address_proof_document || '']);
     await q('INSERT INTO notifications (title, message, type) VALUES ($1,$2,$3)', ['New Restaurant Application! 🍽️', restaurant_name + ' applied to join ZEPPO', 'restaurant_application']);
     res.json({ success: true });
   } catch (e) { console.error(e); res.json({ success: false }); }
