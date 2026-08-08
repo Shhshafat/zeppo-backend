@@ -1202,6 +1202,13 @@ app.post('/api/settings', async (req, res) => {
 });
 
 app.get('/api/stays', async (req, res) => { try { const r = await q('SELECT * FROM stays WHERE is_active = 1'); res.json(r.rows); } catch (e) { res.json([]); } });
+app.get('/api/stays/:id', async (req, res) => {
+  try {
+    const r = await q('SELECT * FROM stays WHERE id = $1', [req.params.id]);
+    if (r.rows.length === 0) return res.json({ error: 'not_found' });
+    res.json(r.rows[0]);
+  } catch (e) { res.json({ error: 'server_error' }); }
+});
 app.post('/api/stays/add', async (req, res) => {
   try {
     const { name, type, price_per_night, address, phone, amenities, images, description, video } = req.body;
