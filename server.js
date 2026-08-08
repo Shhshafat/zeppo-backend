@@ -10,6 +10,39 @@ const crypto = require('crypto');
 const nodemailer = require('nodemailer');
 const { v2: cloudinary } = require('cloudinary');
 const { CloudinaryStorage } = require('multer-storage-cloudinary');
+const admin = require('firebase-admin');
+
+// ===== FIREBASE PUSH NOTIFICATIONS =====
+// Reads the service account from an env var (never a committed file) so the private key stays out of git.
+let firebaseReady = false;
+try {
+  if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+    const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+    admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+    firebaseReady = true;
+    console.log('Firebase Admin initialized — push notifications enabled');
+  } else {
+    console.log('FIREBASE_SERVICE_ACCOUNT not set — push notifications disabled');
+  }
+} catch (e) {
+  console.error('Firebase Admin init failed:', e.message);
+}
+
+// One place all order/status code calls — silently does nothing if a token is missing or Firebase isn't set up,
+// so a notification failure never breaks the actual order flow.
+async function sendPushNotification(fcmToken, title, body, data = {}) {
+  if (!firebaseReady || !fcmToken) return;
+  try {
+    await admin.messaging().send({
+      token: fcmToken,
+      notification: { title, body },
+      data: Object.fromEntries(Object.entries(data).map(([k, v]) => [k, String(v)])),
+      android: { priority: 'high' },
+    });
+  } catch (e) {
+    console.log('Push notification failed:', e.message);
+  }
+}
 
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -68,6 +101,7 @@ async function setupDatabase() {
     id SERIAL PRIMARY KEY, name TEXT, email TEXT UNIQUE, phone TEXT,
     password TEXT, role TEXT DEFAULT 'user', referral_code TEXT UNIQUE,
     referred_by TEXT, wallet_balance INTEGER DEFAULT 0, created_at TIMESTAMP DEFAULT NOW());`);
+  await q(`ALTER TABLE users ADD COLUMN IF NOT EXISTS fcm_token TEXT;`);
   await q(`CREATE TABLE IF NOT EXISTS restaurants (
     id SERIAL PRIMARY KEY, name TEXT, category TEXT, emoji TEXT, address TEXT, description TEXT,
     image TEXT, rating TEXT DEFAULT '4.5', is_open INTEGER DEFAULT 1, active INTEGER DEFAULT 1,
@@ -666,6 +700,7 @@ app.post('/api/restaurant/orders/status', async (req, res) => {
       await q('INSERT INTO notifications (title, message, type) VALUES ($1,$2,$3)',
         ['Order Rejected', rest.name + ' rejected order #' + id + (reason ? ' — ' + reason : ''), 'order_rejected']);
     }
+    notifyCustomerOfStatus(currentOrder, status);
     res.json({ success: true });
   } catch (e) { res.json({ success: false }); }
 });
@@ -775,6 +810,16 @@ app.get('/api/delivery-fee-preview', async (req, res) => {
   } catch (e) { res.json({ delivery_distance_km: null, delivery_fee: 0 }); }
 });
 
+app.post('/api/user/fcm-token', async (req, res) => {
+  const decoded = verifyToken(req);
+  if (!decoded) return res.json({ success: false });
+  try {
+    const { fcm_token } = req.body;
+    await q('UPDATE users SET fcm_token = $1 WHERE id = $2', [fcm_token, decoded.id]);
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false }); }
+});
+
 app.post('/api/order', strictLimiter, async (req, res) => {
   try {
     const { customer_name, customer_phone, customer_address, restaurant_id, restaurant_name, items, total, payment_method, customer_lat, customer_lng } = req.body;
@@ -803,6 +848,12 @@ app.post('/api/order', strictLimiter, async (req, res) => {
       [user_id, customer_name, customer_phone, customer_address, restaurant_id, restaurant_name, JSON.stringify(items), total, payment_method || 'cash', customer_lat || null, customer_lng || null, delivery_distance_km, delivery_fee]);
     const newOrderId = insertRes.rows[0].id;
 
+    if (user_id) {
+      const userR = await q('SELECT fcm_token FROM users WHERE id = $1', [user_id]);
+      const fcmToken = userR.rows[0]?.fcm_token;
+      if (fcmToken) sendPushNotification(fcmToken, 'Order Placed! 🎉', `Your order from ${restaurant_name} has been placed. We'll notify you as it progresses.`, { order_id: newOrderId, status: 'pending' });
+    }
+
     // Look for a delivery partner right away — the restaurant will only see "start cooking"
     // once someone has actually accepted, so food never gets made for nobody to pick up.
     let assignedRider = null;
@@ -816,6 +867,25 @@ app.post('/api/order', strictLimiter, async (req, res) => {
   } catch (e) { console.error(e); res.json({ success: false }); }
 });
 app.get('/api/orders', async (req, res) => { try { const r = await q('SELECT * FROM orders ORDER BY created_at DESC'); res.json(r.rows); } catch (e) { res.json([]); } });
+const STATUS_MESSAGES = {
+  confirmed: { title: 'Order Confirmed! 🎉', body: (name) => name + ' has confirmed your order and started preparing it.' },
+  preparing: { title: 'Preparing your food 👨‍🍳', body: (name) => name + ' is preparing your order.' },
+  on_the_way: { title: 'On the way! 🛵', body: () => 'Your order has been picked up and is on its way.' },
+  delivered: { title: 'Delivered! ✅', body: () => 'Enjoy your meal! Thanks for ordering with ZEPPO.' },
+  cancelled: { title: 'Order Cancelled', body: (name) => name + ' was unable to take this order. It has been cancelled.' },
+};
+
+async function notifyCustomerOfStatus(order, status) {
+  if (!order || !order.user_id) return;
+  const msg = STATUS_MESSAGES[status];
+  if (!msg) return;
+  try {
+    const userR = await q('SELECT fcm_token FROM users WHERE id = $1', [order.user_id]);
+    const token = userR.rows[0]?.fcm_token;
+    if (token) await sendPushNotification(token, msg.title, msg.body(order.restaurant_name), { order_id: order.id, status });
+  } catch (e) {}
+}
+
 app.post('/api/orders/status', async (req, res) => {
   try {
     const { id, status } = req.body;
@@ -834,6 +904,7 @@ app.post('/api/orders/status', async (req, res) => {
       const order = r.rows[0];
       if (order && order.delivery_boy_id) await q('UPDATE delivery_boys SET total_deliveries = total_deliveries + 1, total_earned = total_earned + salary_per_delivery WHERE id = $1', [order.delivery_boy_id]);
     }
+    if (before.rows[0]) notifyCustomerOfStatus(before.rows[0], status);
     res.json({ success: true });
   } catch (e) { res.json({ success: false }); }
 });
