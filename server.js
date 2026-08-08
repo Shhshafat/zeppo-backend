@@ -10,16 +10,17 @@ const crypto = require('crypto');
 const nodemailer = require('nodemailer');
 const { v2: cloudinary } = require('cloudinary');
 const { CloudinaryStorage } = require('multer-storage-cloudinary');
-const admin = require('firebase-admin');
+const { initializeApp, cert } = require('firebase-admin/app');
+const { getMessaging } = require('firebase-admin/messaging');
 
 // ===== FIREBASE PUSH NOTIFICATIONS =====
 // Reads the service account from an env var (never a committed file) so the private key stays out of git.
-let firebaseReady = false;
+let firebaseMessaging = null;
 try {
   if (process.env.FIREBASE_SERVICE_ACCOUNT) {
     const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-    admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
-    firebaseReady = true;
+    initializeApp({ credential: cert(serviceAccount) });
+    firebaseMessaging = getMessaging();
     console.log('Firebase Admin initialized — push notifications enabled');
   } else {
     console.log('FIREBASE_SERVICE_ACCOUNT not set — push notifications disabled');
@@ -31,9 +32,9 @@ try {
 // One place all order/status code calls — silently does nothing if a token is missing or Firebase isn't set up,
 // so a notification failure never breaks the actual order flow.
 async function sendPushNotification(fcmToken, title, body, data = {}) {
-  if (!firebaseReady || !fcmToken) return;
+  if (!firebaseMessaging || !fcmToken) return;
   try {
-    await admin.messaging().send({
+    await firebaseMessaging.send({
       token: fcmToken,
       notification: { title, body },
       data: Object.fromEntries(Object.entries(data).map(([k, v]) => [k, String(v)])),
