@@ -1202,13 +1202,6 @@ app.post('/api/settings', async (req, res) => {
 });
 
 app.get('/api/stays', async (req, res) => { try { const r = await q('SELECT * FROM stays WHERE is_active = 1'); res.json(r.rows); } catch (e) { res.json([]); } });
-app.get('/api/stays/:id', async (req, res) => {
-  try {
-    const r = await q('SELECT * FROM stays WHERE id = $1', [req.params.id]);
-    if (r.rows.length === 0) return res.json({ error: 'not_found' });
-    res.json(r.rows[0]);
-  } catch (e) { res.json({ error: 'server_error' }); }
-});
 app.post('/api/stays/add', async (req, res) => {
   try {
     const { name, type, price_per_night, address, phone, amenities, images, description, video } = req.body;
@@ -1247,6 +1240,13 @@ app.post('/api/stays/book', async (req, res) => {
 });
 app.get('/api/stays/bookings', async (req, res) => { try { const r = await q('SELECT * FROM stay_bookings ORDER BY created_at DESC'); res.json(r.rows); } catch (e) { res.json([]); } });
 app.post('/api/stays/bookings/status', async (req, res) => { const { id, status } = req.body; await q('UPDATE stay_bookings SET status = $1 WHERE id = $2', [status, id]); res.json({ success: true }); });
+app.get('/api/stays/:id', async (req, res) => {
+  try {
+    const r = await q('SELECT * FROM stays WHERE id = $1', [req.params.id]);
+    if (r.rows.length === 0) return res.json({ error: 'not_found' });
+    res.json(r.rows[0]);
+  } catch (e) { res.json({ error: 'server_error' }); }
+});
 
 // ===== TABLE BOOKINGS (Dineout) =====
 app.post('/api/tables/book', async (req, res) => {
