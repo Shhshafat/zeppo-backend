@@ -204,6 +204,8 @@ async function setupDatabase() {
   await q(`CREATE TABLE IF NOT EXISTS stay_bookings (
     id SERIAL PRIMARY KEY, stay_id INTEGER, stay_name TEXT, customer_name TEXT, customer_phone TEXT,
     check_in TEXT, check_out TEXT, guests INTEGER DEFAULT 1, status TEXT DEFAULT 'pending', created_at TIMESTAMP DEFAULT NOW());`);
+  await q(`ALTER TABLE stay_bookings ADD COLUMN IF NOT EXISTS notified_checkin INTEGER DEFAULT 0;`);
+  await q(`ALTER TABLE stay_bookings ADD COLUMN IF NOT EXISTS notified_checkout INTEGER DEFAULT 0;`);
   await q(`CREATE TABLE IF NOT EXISTS table_bookings (
     id SERIAL PRIMARY KEY, restaurant_id INTEGER, restaurant_name TEXT, customer_name TEXT, customer_phone TEXT,
     booking_date TEXT, booking_time TEXT, guests INTEGER DEFAULT 2, status TEXT DEFAULT 'pending', created_at TIMESTAMP DEFAULT NOW());`);
@@ -290,6 +292,53 @@ function haversineKm(lat1, lng1, lat2, lng2) {
   const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLng / 2) ** 2;
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return R * c;
+}
+
+// ===== STAY BOOKING HELPERS — occupancy status + availability + check-in/out reminders =====
+function todayISO() {
+  // IST is UTC+5:30 — using local server clock's date directly keeps this simple and good enough
+  // for a single-city app; a booking's "today" only needs day-level precision, not the exact minute.
+  return new Date().toISOString().slice(0, 10);
+}
+
+// A booking's ADMIN status (pending/confirmed/rejected) is separate from its OCCUPANCY status —
+// this tells the front desk at a glance whether a confirmed guest hasn't arrived yet, is currently
+// staying, or has already left, purely from today's date vs the booking's date range.
+function occupancyStatus(booking) {
+  if (booking.status !== 'confirmed') return null;
+  const today = todayISO();
+  if (today < booking.check_in) return 'upcoming';
+  if (today >= booking.check_in && today < booking.check_out) return 'checked_in';
+  return 'checked_out';
+}
+
+// Blocks a new booking from overlapping an already-confirmed stay for the same room —
+// this is what makes a room "unavailable" for dates someone else already holds.
+async function hasOverlappingBooking(stayId, checkIn, checkOut, excludeBookingId = null) {
+  const r = await q(
+    `SELECT id FROM stay_bookings WHERE stay_id = $1 AND status = 'confirmed'
+     AND check_in < $3 AND check_out > $2 ${excludeBookingId ? 'AND id != $4' : ''}`,
+    excludeBookingId ? [stayId, checkIn, checkOut, excludeBookingId] : [stayId, checkIn, checkOut]
+  );
+  return r.rows.length > 0;
+}
+
+// Called opportunistically (piggy-backed on the notifications poll) rather than a real cron job —
+// good enough for a small-town app's check-in volume, and needs no extra infrastructure to run.
+async function generateStayReminders() {
+  try {
+    const today = todayISO();
+    const checkins = await q("SELECT * FROM stay_bookings WHERE status = 'confirmed' AND check_in = $1 AND notified_checkin = 0", [today]);
+    for (const b of checkins.rows) {
+      await q('INSERT INTO notifications (title, message, type) VALUES ($1,$2,$3)', ['Guest Checking In Today 🏨', b.customer_name + ' checks in to ' + b.stay_name + ' today', 'stay_checkin']);
+      await q('UPDATE stay_bookings SET notified_checkin = 1 WHERE id = $1', [b.id]);
+    }
+    const checkouts = await q("SELECT * FROM stay_bookings WHERE status = 'confirmed' AND check_out = $1 AND notified_checkout = 0", [today]);
+    for (const b of checkouts.rows) {
+      await q('INSERT INTO notifications (title, message, type) VALUES ($1,$2,$3)', ['Guest Checking Out Today 👋', b.customer_name + ' checks out of ' + b.stay_name + ' today', 'stay_checkout']);
+      await q('UPDATE stay_bookings SET notified_checkout = 1 WHERE id = $1', [b.id]);
+    }
+  } catch (e) { console.log('generateStayReminders error:', e.message); }
 }
 
 // Offers an order to the closest online, unoccupied delivery boy — they still have to accept it.
@@ -1171,7 +1220,13 @@ app.get('/api/ratings/:restaurant_id', async (req, res) => {
   try { const r = await q('SELECT r.*, u.name as user_name FROM ratings r LEFT JOIN users u ON r.user_id = u.id WHERE r.restaurant_id = $1 ORDER BY r.created_at DESC', [req.params.restaurant_id]); res.json(r.rows); } catch (e) { res.json([]); }
 });
 
-app.get('/api/notifications', async (req, res) => { try { const r = await q('SELECT * FROM notifications ORDER BY created_at DESC LIMIT 20'); res.json(r.rows); } catch (e) { res.json([]); } });
+app.get('/api/notifications', async (req, res) => {
+  try {
+    await generateStayReminders();
+    const r = await q('SELECT * FROM notifications ORDER BY created_at DESC LIMIT 20');
+    res.json(r.rows);
+  } catch (e) { res.json([]); }
+});
 app.get('/api/notifications/unread', async (req, res) => { try { const r = await q("SELECT COUNT(*) as count FROM notifications WHERE is_read = 0"); res.json({ count: parseInt(r.rows[0].count) }); } catch (e) { res.json({ count: 0 }); } });
 app.post('/api/notifications/read', async (req, res) => { await q('UPDATE notifications SET is_read = 1'); res.json({ success: true }); });
 
@@ -1233,13 +1288,50 @@ app.post('/api/stays/book', async (req, res) => {
     ]);
     if (err) return res.json({ success: false, message: err });
     if (!check_in || !check_out) return res.json({ success: false, message: 'Please select check-in and check-out dates.' });
+    if (check_out <= check_in) return res.json({ success: false, message: 'Check-out must be after check-in.' });
+    if (await hasOverlappingBooking(stay_id, check_in, check_out)) {
+      return res.json({ success: false, message: 'This room is already booked for some of those dates. Please pick different dates.' });
+    }
     await q('INSERT INTO stay_bookings (stay_id, stay_name, customer_name, customer_phone, check_in, check_out, guests) VALUES ($1,$2,$3,$4,$5,$6,$7)', [stay_id, stay_name, customer_name, customer_phone, check_in, check_out, guests || 1]);
     await q('INSERT INTO notifications (title, message, type) VALUES ($1,$2,$3)', ['New Stay Booking Request!', customer_name + ' wants to book ' + stay_name + ' (' + check_in + ' to ' + check_out + ')', 'booking']);
     res.json({ success: true });
   } catch (e) { console.error(e); res.json({ success: false }); }
 });
-app.get('/api/stays/bookings', async (req, res) => { try { const r = await q('SELECT * FROM stay_bookings ORDER BY created_at DESC'); res.json(r.rows); } catch (e) { res.json([]); } });
-app.post('/api/stays/bookings/status', async (req, res) => { const { id, status } = req.body; await q('UPDATE stay_bookings SET status = $1 WHERE id = $2', [status, id]); res.json({ success: true }); });
+app.get('/api/stays/bookings', async (req, res) => {
+  try {
+    const r = await q('SELECT * FROM stay_bookings ORDER BY created_at DESC');
+    res.json(r.rows.map((b) => ({ ...b, occupancy_status: occupancyStatus(b) })));
+  } catch (e) { res.json([]); }
+});
+app.post('/api/stays/bookings/status', async (req, res) => {
+  try {
+    const { id, status } = req.body;
+    // Approving a booking is exactly when it needs to start blocking the room for those dates —
+    // check for a clash right here so two guests can never both get confirmed for overlapping nights.
+    if (status === 'confirmed') {
+      const cur = await q('SELECT * FROM stay_bookings WHERE id = $1', [id]);
+      const b = cur.rows[0];
+      if (b && await hasOverlappingBooking(b.stay_id, b.check_in, b.check_out, id)) {
+        return res.json({ success: false, message: 'Another confirmed booking already overlaps these dates for this room.' });
+      }
+    }
+    await q('UPDATE stay_bookings SET status = $1 WHERE id = $2', [status, id]);
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false }); }
+});
+app.post('/api/stays/bookings/delete', async (req, res) => {
+  try {
+    await q('DELETE FROM stay_bookings WHERE id = $1', [req.body.id]);
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false }); }
+});
+// Lets the customer app show "Booked" for dates a room is already taken, before they even submit.
+app.get('/api/stays/:id/availability', async (req, res) => {
+  try {
+    const r = await q("SELECT check_in, check_out FROM stay_bookings WHERE stay_id = $1 AND status = 'confirmed' AND check_out >= $2", [req.params.id, todayISO()]);
+    res.json(r.rows);
+  } catch (e) { res.json([]); }
+});
 app.get('/api/stays/:id', async (req, res) => {
   try {
     const r = await q('SELECT * FROM stays WHERE id = $1', [req.params.id]);
